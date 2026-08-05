@@ -172,3 +172,112 @@ checked by eye against a published figure for a 7B-class model on an A100.
 `[outcome: Day 1 build complete on the CPU dev box; the two GPU-dependent
 Day-18 deliverables (TensorRT-LLM spike outcome, concurrency-1 sanity
 number) are queued for the next Colab session, not faked or estimated here]`
+
+---
+
+## Day 2 — Wed 5 Aug 2026
+
+M03-SERVING.md calls this "Day 19": the load harness, and proving it is not
+the bottleneck. Unlike Day 1's GPU-dependent deliverables, **the entire
+§4.2 validity gate turned out to be runnable on the CPU dev box** —
+`mock_server.py` has no real compute behind it, so the harness could
+actually be proven today rather than only written and queued for Colab.
+
+**A real bug, found and fixed, worth recording in the M01/M02 style.**
+`client.py` and `mock_server.py` worked individually but a full-stream test
+through `mock_server.py` showed `n_tokens` correct (128, matching the
+forced `min_tokens`) but wall time far too short — a single request with a
+configured ~1.32s of total sleep completed in ~0.17s. Isolated with a
+minimal repro (`asyncio.sleep(0.01)` in a loop, interleaved with
+`aiohttp` `StreamResponse.write()` calls) down to: **Windows' default
+`ProactorEventLoop` silently collapses short (`0.01s`) `asyncio.sleep()`
+calls to near-zero when they're interleaved with stream writes.** A plain
+`for i in range(10): await asyncio.sleep(0.01)` loop with no aiohttp
+involved timed correctly (~0.157s for 10×10ms); the same 10 sleeps
+interleaved with `resp.write()` calls in an aiohttp handler completed in
+~0.004s. Confirmed the fix by switching to
+`asyncio.WindowsSelectorEventLoopPolicy()` on `sys.platform == "win32"`
+before `web.run_app` — same handler, same sleep durations, correct timing
+(~0.156s for the same 10×10ms loop). Applied only under the `win32` guard in
+`mock_server.py`; Colab (Linux) never hits this and keeps the default loop.
+This is exactly the kind of thing that would have silently invalidated
+today's validity-gate numbers if it had gone unnoticed — a "ceiling" that
+completes 8x too fast is not a client that's keeping up, it's a server that
+isn't actually pacing itself.
+
+**The validity gate, run for real:** `scripts/mock_server.py` + all 8
+concurrency levels (`scripts/sweep.py --framework mock --card mock`, 8s
+window, 1 repeat, 8 total warmup requests distributed per §4.3) +
+`scripts/validate_client.py`. Raw sweep in `data/mock_validity_gate.jsonl`,
+full write-up in `results/harness_validation.md`.
+
+- Achieved throughput scales **linearly with concurrency across the entire
+  1→128 range** — ratio to `concurrency × (throughput at concurrency 1)`
+  stays within **0.93–1.06** at every level, with no downward trend
+  approaching 128. That flatness, not a match to any absolute number, is
+  the actual validity signature: a client acting as the bottleneck would
+  show the ratio *falling* as concurrency rises, not sitting at a constant
+  level all the way to the top of the axis.
+- Ratio to the mock server's own *theoretical* ceiling (computed from its
+  configured 50ms TTFT + 10ms/token constants) sits around **0.57–0.64 at
+  every level** — flat, not degrading, and explained by a second, smaller
+  finding: even after the ProactorEventLoop fix, Windows' asyncio timer
+  granularity still inflates the mock server's configured 10ms inter-token
+  sleep to an *actual* ~16–17ms (measured directly: a 10-sleep loop
+  requesting 100ms total took ~157ms). That's the server's own timing
+  fidelity on this OS, not a client artifact — it moves the theoretical
+  ceiling, not the linear-scaling check, which is why the gate is reported
+  against both numbers rather than one.
+- **Client CPU utilisation never exceeded 51% (mean) even at concurrency
+  128** (`psutil.Process().cpu_percent()`, sampled every 0.5s throughout
+  each window) — nowhere near pegged, consistent with the linear-scaling
+  result.
+
+**Result: PASS.** `scripts/client.py`'s closed-loop design (`aiohttp`,
+`TCPConnector(limit=0)` — aiohttp's default 100-connection cap would have
+silently truncated the top of the concurrency axis, worth noting since it
+is exactly the kind of thing that fails quietly) holds 128 concurrent
+in-flight streams without becoming the bottleneck itself. This is the §4.2
+gate that has to pass before any real server number gets trusted, and it
+now has.
+
+**Warmup-count interpretation, made explicit rather than left implicit.**
+§18's "32 requests" working assumption doesn't state whether that's 32 per
+worker or 32 total. Read it as **32 total**, distributed round-robin across
+the level's workers (`sweep._warmup_count_per_worker`, floored to a minimum
+of 1 per worker) — the alternative (32 *per worker*) would mean 4,096
+discarded warmup requests at concurrency 128, which at a real ~1.3s/request
+would be over an hour of warmup before a single measured request. Flagging
+this interpretation explicitly rather than silently picking one, since §18
+itself says this number needs confirming against a real curve — that
+confirmation is queued for the Colab session along with the concurrency-1
+sanity number.
+
+**Build:** `serving/record.py` (schema assembly, percentiles, goodput,
+JSONL read/write) · `scripts/mock_server.py` (with the event-loop-policy
+fix) · `scripts/client.py` completed (full closed-loop N-worker driver,
+`run_warmup`, `run_measurement_window`, client CPU sampling) ·
+`scripts/sweep.py` (concurrency-ladder driver, framework-agnostic — same
+code will drive vLLM/TensorRT-LLM later) · `scripts/validate_client.py` ·
+`results/harness_validation.md` · `data/mock_validity_gate.jsonl` · 23 new
+tests (`tests/test_mock_server.py`, `tests/test_record.py`,
+`tests/test_client.py`, `tests/test_sweep.py`) — 50 total, all passing on
+CPU.
+
+**Write:** `PAPER.md` §3.3 Measurement protocol (closed-loop rationale,
+TTFT/TPOT formulas with the `-1` note, warmup policy, window/repeat
+rationale, p50/p95 rationale), §3.4 Harness validation (the mock-server
+result, stated as numbers).
+
+**Still queued for Colab (unchanged from Day 1):** the TensorRT-LLM 30
+-minute spike (`scripts/trtllm_spike.sh`), the vLLM concurrency-1 sanity
+number (`scripts/serve_vllm.py`), and now also **the first real curve**
+(vLLM on A100, FP16, all 8 concurrency levels via `scripts/sweep.py
+--framework vllm --card A100-SXM4-40GB`) — the harness that will produce it
+is now built, tested, and proven not to be the bottleneck, but running it
+against a real model still needs the rented GPU.
+
+`[outcome: §4.2 validity gate PASSED on the CPU dev box, with two real bugs
+found and fixed along the way (ProactorEventLoop sleep collapse; aiohttp's
+default 100-connection cap). The harness is ready; the first real curve is
+still queued for Colab, not faked or estimated here]`

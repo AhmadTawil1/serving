@@ -159,8 +159,86 @@ and carries `gpu`, `driver`, `cuda`, `torch`, `git_sha`, `model_revision`,
 `prompts_sha` — framework and framework_version live in the record's
 `config` block instead, since they vary per run rather than per environment.
 
-[pending: block day 2 (harness/metrics/provenance detail once `sweep.py` and
-`record.py` exist) — §3.3 measurement protocol, §3.4 harness validation]
+### 3.3 Measurement protocol
+
+**Closed-loop, and why.** Concurrency here means a fixed number of workers,
+each holding exactly one request in flight at all times: send, await the
+full streamed response, send the next (§4.2). This is a deliberate choice
+over open-loop (fixed arrival-rate) load generation, which is the other
+standard design. Open-loop produces queue-collapse behaviour once the
+server passes saturation — arrival rate keeps constant while service time
+grows, so queueing delay dominates the latency numbers and the framework
+crossover this study is looking for gets buried under it. Closed-loop keeps
+the x-axis a direct read of "how many requests were actually in flight,"
+which is what a crossover-versus-concurrency claim needs.
+
+**Client-side latency, not server-side.** The server does not know when the
+first byte reached the client, and "when does text start appearing for a
+user" is a client-side question by construction. Every timestamp in this
+study is taken by `scripts/client.py` around the HTTP response stream:
+
+```
+request sent            -> t0
+first streamed chunk    -> t1        TTFT = t1 - t0
+last streamed chunk     -> t2        TPOT = (t2 - t1) / (n_output_tokens - 1)
+```
+
+The `- 1` in TPOT matters: the first token's latency is already charged to
+TTFT, and counting it again in TPOT's denominator makes every framework's
+decode number look marginally better in a way that cancels out and survives
+review undetected — the kind of error this design exists to avoid making
+once, let alone symmetrically across two frameworks.
+
+**One client drives both frameworks.** vLLM and TensorRT-LLM both expose
+OpenAI-compatible streaming completions endpoints, so
+`client.stream_completion` is the only implementation of the TTFT/TPOT
+formula in this study — there is no framework-specific request path to
+become a confound. `min_tokens` is set equal to `max_tokens` on every
+request (§3) so a framework that stops generating early cannot look faster
+for free.
+
+**Warmup.** A fixed count of discarded requests *at the target concurrency*
+— not at concurrency 1, and not a fixed duration — because first requests
+trigger CUDA graph capture, lazy kernel compilation, and memory-pool growth
+that a concurrency-1 warmup would not exercise the same way a concurrency
+-128 run does. The working assumption from `M03-SERVING.md` §18 is 32 total
+discarded requests, distributed round-robin across the level's workers
+(`scripts/sweep.py`'s `_warmup_count_per_worker`) rather than 32 per worker
+— at concurrency 128 that is roughly one discarded request per worker, which
+is the smallest warmup this design permits and is exactly the number Day 19
+(block day 2)'s real curve is meant to confirm or revise, per §18.
+
+**Window length and repeats.** A fixed wall-clock measurement window per
+level (60s working assumption) rather than a fixed request count, because a
+fixed count would take a different amount of wall time at every concurrency
+level and complicate comparing client CPU load across levels. Three repeats
+per cell, one JSON record per repeat rather than a pre-aggregated mean
+(`serving/record.py`) — REFERENCE.md §7's carried-forward rule — so a
+crossover that turns out to sit inside the run-to-run spread can be shown
+as such rather than only asserted.
+
+**p50/p95, never the mean.** Latency on a rented, shared host is
+right-skewed — a long tail from a noisy neighbour or a GC pause pulls a mean
+up without being representative of what most requests experienced. Every
+latency field in the record schema (§8) is reported as p50/p95.
+
+### 3.4 Harness validation
+
+Before any number from a real server is trusted, the client has to be shown
+not to be the thing being measured. `scripts/mock_server.py` serves the
+identical OpenAI-compatible streaming wire format on a canned token stream
+with fixed, known per-token timing, so its own throughput ceiling at any
+concurrency is computable in closed form rather than measured. Sweeping the
+full 1–128 concurrency ladder against it and comparing achieved throughput
+to `concurrency × (achieved at concurrency 1)` — a linear-scaling check that
+does not depend on the mock server's absolute timing accuracy, only on
+whether throughput keeps scaling as concurrency rises — stayed within
+0.93–1.06 of perfectly linear at every level, with no downward trend
+approaching 128, and client-side CPU utilisation never exceeded 51% (mean)
+even at the top of the axis. Full table and the reasoning behind checking
+scaling rather than absolute throughput in `results/harness_validation.md`.
+This does not show the real servers will behave identically — only that a
+flat or falling curve later cannot be explained away as a harness artifact.
 
 ---
 
