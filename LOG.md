@@ -482,3 +482,150 @@ this box); build_trtllm_engine.py hardened for L4's tighter host RAM;
 check_hard_stop.py written and tested against synthetic build-log fixtures,
 and used to catch + fix a real self-contradiction in SCOPE.md's original
 hard-stop wording. The actual hard-stop call is still queued for Colab]`
+
+---
+
+## Day 5 — Wed 5 Aug 2026 — **first GPU session**
+
+First real hardware of the block. Colab Pro, A100-SXM4-40GB, driver 580.82.07.
+Two things came out of it: a working vLLM install with a complete FP16
+concurrency curve, and the discovery — from the server's own log, not from the
+records — that the curve does not measure what it was supposed to measure.
+
+### Install: the toolchain risk landed on the safe half
+
+`M03-SERVING.md` §2.1 predicted the toolchain risk would be TensorRT-LLM. It
+appeared on vLLM first, before TensorRT-LLM was touched at all.
+
+`pip install vllm` succeeded but `import vllm` failed:
+
+```
+ImportError: libcudart.so.13: cannot open shared object file
+```
+
+**Not a driver problem.** `nvidia-smi` reported CUDA 13.0. The cause was inside
+the pip environment: vLLM 0.26.0's PyPI wheel ships CUDA 13 binaries, while the
+runtime's torch was `2.11.0+cu128`, a CUDA 12.8 build. The CUDA 13 runtime
+*was* installed (`nvidia-cuda-runtime 13.3.29`, providing
+`nvidia/cu13/lib/libcudart.so.13`) but that directory is not on the dynamic
+loader's search path — torch's cu12 stack registers `nvidia/cuda_runtime/lib`
+instead.
+
+Fixed without reinstalling anything:
+
+```bash
+echo "/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib" \
+  > /etc/ld.so.conf.d/cu13.conf && ldconfig
+```
+
+vLLM then imported and ran normally against the cu128 torch — it links through
+the stable libtorch ABI (`vllm._C_stable_libtorch`), so the CUDA-version
+mismatch between wheel and torch is not itself fatal; only the unresolvable
+`.so` was.
+
+Roughly 25 minutes lost, inside the 30-minute box. Two earlier attempts were
+wasted re-running cells out of order rather than on the error itself — the
+install is now a single ordered cell in the runbook.
+
+**Threats entry this creates:** framework installation is CUDA-version-coupled,
+and vLLM's default wheel assumed a newer CUDA runtime than the rented host's
+torch provided. Install-time friction of this kind is absent from every
+published framework comparison and belongs in a paper about framework choice.
+
+### vLLM defaults observed at launch, and why they are recorded
+
+From the startup banner, all confirmed against `config.py`: model
+`Qwen/Qwen2.5-7B-Instruct`, revision `a09a3545…`, `max_model_len` 2048, dtype
+float16. Three defaults were **not** specified by us and are now on the record:
+
+| Default | Value | Why it matters |
+|---|---|---|
+| `enable_prefix_caching` | `True` | See below. This one invalidated the run's premise |
+| `enable_chunked_prefill` | `True` | Changes how prefill and decode interleave under load |
+| async scheduling | enabled | Affects the concurrency curve's shape |
+
+Also logged: `WARNING Casting torch.bfloat16 to torch.float16`. Qwen2.5 is
+natively bf16 and is being served in fp16 because `config.py` fixes fp16. Not
+an error, but **the same cast must occur on TensorRT-LLM** or the two
+frameworks are not serving identical numerics.
+
+### The curve — clean, and measuring the wrong thing
+
+24/24 records, every one `status: ok`, prompts_sha and model revision stamped.
+
+| conc | mean tok/s | repeat spread | scaling eff. | TTFT p50 | TPOT p50 | client CPU |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 82.4 | 0.00% | 100% | 21.2 ms | 12.06 ms | 1.1% |
+| 2 | 165.0 | 0.01% | 100.1% | 32.5 ms | 11.97 ms | 1.5% |
+| 4 | 330.7 | 0.01% | 100.3% | 30.5 ms | 11.95 ms | 2.2% |
+| 8 | 648.7 | 0.02% | 98.4% | 38.0 ms | 12.12 ms | 3.4% |
+| 16 | 1257.2 | 1.66% | 95.3% | 41.1 ms | 12.42 ms | 5.3% |
+| 32 | 2329.2 | 0.38% | 88.3% | 48.2 ms | 13.41 ms | 9.2% |
+| 64 | 4098.9 | 1.51% | 77.7% | 63.7 ms | 15.27 ms | 15.3% |
+| 128 | 6158.4 | 0.37% | 58.4% | 89.9 ms | 20.09 ms | 22.8% |
+
+**Run-to-run spread is under 2% at every level, mostly under 0.5%.** Any
+crossover worth reporting will sit far outside that band, which is the
+condition §1's *Partial if* clause was written against. Client CPU peaked at
+22.8% — the §4.2 harness gate holds under real server load, not only against
+the mock.
+
+**But the server log says the card was never loaded:**
+
+```
+Prefix cache hit rate:  96.9%
+GPU KV cache usage:      5.2%     <- at concurrency 128
+Running: 123 reqs, Waiting: 0 reqs
+GPU KV cache size: 391,152 tokens
+Maximum concurrency for 2,048 tokens per request: 190.99x
+```
+
+**Mechanism.** `data/prompts.json` holds **8** prompts. A 60-second window at
+concurrency 128 issued ~2,944 requests, so each prompt ran ~368 times. After
+its first use every repeat hit the prefix cache and skipped prefill outright.
+At concurrency 128 the engine reported prompt throughput of 696 tok/s against
+generation throughput of 6,346 tok/s — prefill had almost stopped happening.
+
+Three consequences, all fatal to the run as a *main-sweep* result:
+
+1. **TTFT is a cache-lookup time, not a prefill time.** 21 ms at concurrency 1
+   is not what a 512-token prefill costs on this card.
+2. **The A100 was never stressed.** 5.2% KV utilisation, zero queue depth, and
+   capacity for 191 concurrent full-length requests against a load of 128. No
+   crossover can appear anywhere in 1–128 by construction; the study would have
+   measured nothing and looked like it had.
+3. **It is an unmatched framework default.** TensorRT-LLM's prefix-reuse
+   default is not vLLM's, so a Day 20 comparison against this curve would
+   attribute a caching difference to the framework.
+
+This was caught from the log rather than from the records, because
+`kv_cache_util_pct`, `peak_vram_mb` and `gpu_util_pct` all came back **null** —
+§8 requires them and the harness is not yet filling them. `kv_cache_util_pct`
+is precisely the field that would have surfaced this automatically. Logged as
+outstanding; not fixed today.
+
+### Decision
+
+**Prefix caching is OFF for the main sweep, on both frameworks**, set
+explicitly in both directions rather than left to the default
+(`scripts/serve_vllm.py`, `_PREFIX_CACHE_DEFAULT = False`). The launch command
+now always states which regime a run was in.
+
+Chosen over expanding the prompt set (which would break the frozen
+`prompts_sha` and still leave caching as an unmatched default) and over
+extending the concurrency axis (which would leave TTFT a cache-lookup number).
+
+**The caching-ON curve is kept, not discarded** —
+`results/vllm_a100_fp16_prefixcache_on.jsonl`. It is a legitimate measurement
+of vLLM under high prompt reuse, and having both regimes is worth more than
+having the intended one alone. Whether it earns a figure or a paragraph is a
+Day 24 question.
+
+`[outcome: partial — vLLM installs and serves on the A100; a complete,
+low-variance 8-point FP16 curve exists but measures a cache-served workload
+rather than a loaded card. Main-sweep curve to be re-run with prefix caching
+disabled before any TensorRT-LLM comparison]`
+
+**Next session:** re-run the A100 FP16 curve with caching off, confirm KV
+utilisation and queue depth are non-trivial this time, then start the
+TensorRT-LLM spike in a **separate runtime**.

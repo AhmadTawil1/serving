@@ -40,7 +40,29 @@ _DTYPE_FLAGS = {
 }
 
 
-def launch(card: str, precision: str, port: int) -> subprocess.Popen:
+# Prefix caching is OFF by default for this study, decided 5 Aug 2026 after
+# the first A100 curve (LOG.md Day 5). vLLM enables it by default; with only
+# 8 frozen prompts and ~2,900 requests per window, the hit rate reached
+# **96.9%** and GPU KV-cache usage sat at **5.2%** at concurrency 128. Nearly
+# every request skipped prefill, so the reported TTFT was a cache lookup
+# rather than a 512-token prefill, and the card was never loaded.
+#
+# Two reasons it is off rather than merely disclosed:
+#   1. **Comparability.** TensorRT-LLM's prefix-reuse default is not vLLM's.
+#      An unmatched framework default is a confound, not a finding, and §3
+#      lists every such setting as held-fixed control.
+#   2. **The axis has to bite.** With prefill cached the A100 showed zero
+#      queue depth at concurrency 128, so no crossover can exist anywhere in
+#      the swept range -- the study would measure nothing by construction.
+#
+# The caching-ON curve is kept as a real data point
+# (`results/vllm_a100_fp16_prefixcache_on.jsonl`), not discarded.
+_PREFIX_CACHE_DEFAULT = False
+
+
+def launch(
+    card: str, precision: str, port: int, prefix_caching: bool = _PREFIX_CACHE_DEFAULT
+) -> subprocess.Popen:
     revision = pins.revision_for(config.STUDY_MODEL)
     cmd = [
         "vllm",
@@ -53,8 +75,13 @@ def launch(card: str, precision: str, port: int) -> subprocess.Popen:
         "--port",
         str(port),
         *_DTYPE_FLAGS[precision],
+        # Stated explicitly in both directions rather than relying on the
+        # framework default, so the launch command in the log always records
+        # which regime the run was in.
+        "--enable-prefix-caching" if prefix_caching else "--no-enable-prefix-caching",
     ]
     print(f"[{_LABEL}] card={card} precision={precision} revision={revision}")
+    print(f"[{_LABEL}] prefix_caching={prefix_caching}")
     print(f"[{_LABEL}] launching:", " ".join(cmd))
     return subprocess.Popen(cmd)
 
@@ -66,9 +93,18 @@ def main() -> None:
     ap.add_argument("--card", required=True, choices=config.CARDS)
     ap.add_argument("--precision", default="fp16", choices=config.PRECISIONS)
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument(
+        "--prefix-caching",
+        action="store_true",
+        default=_PREFIX_CACHE_DEFAULT,
+        help=(
+            "enable vLLM prefix caching. OFF by default for this study -- see "
+            "the _PREFIX_CACHE_DEFAULT comment and LOG.md Day 5"
+        ),
+    )
     args = ap.parse_args()
 
-    proc = launch(args.card, args.precision, args.port)
+    proc = launch(args.card, args.precision, args.port, args.prefix_caching)
     try:
         serve_common.wait_healthy(_LABEL, args.port)
         serve_common.warmup(_LABEL, args.port)
