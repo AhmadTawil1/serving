@@ -1,0 +1,49 @@
+[project]
+name = "serving"
+version = "0.1.0"
+description = "Measurement 03 -- Serving: does the vLLM/TensorRT-LLM crossover move with GPU tier?"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.11.0",
+    "huggingface-hub>=1.26.0",
+    "matplotlib>=3.10.0",
+    "numpy>=2.5.1",
+    "pyyaml>=6.0.3",
+    "requests>=2.32.0",
+    "torch>=2.13.0",
+    "transformers>=5.14.1",
+]
+
+# vLLM is deliberately NOT a dependency of this project. It pins its own
+# torch/transformers versions (torch==2.11.0, transformers<4.56 as of
+# 0.26.0) that conflict with the transformers>=5 this project's own tooling
+# (prompts.py, quality.py) needs, and it has no Windows wheel besides. It is
+# installed in its own environment on the GPU host per `configs/serve-env.md`
+# -- `uv run` here never needs to see it. Same reasoning will apply to
+# TensorRT-LLM once the Day 18 spike confirms an install path (§6).
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.uv.sources]
+# Windows dev machine has no CUDA GPU and the default (CUDA-enabled) PyPI
+# wheel fails a DLL init on it -- redirect to the CPU-only build there only.
+# Linux (Colab, A100/L4) keeps the default CUDA-enabled wheel from PyPI.
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["serving"]

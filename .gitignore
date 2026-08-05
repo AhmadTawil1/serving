@@ -1,0 +1,24 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+.claude
+
+# Regenerable build artifacts
+.cache/
+.pytest_cache/
+
+# Engine builds are large binary artifacts, architecture-specific, and
+# persisted to Drive per M03-SERVING.md §5 -- never committed here. Only the
+# build log (wall time, RAM, VRAM, outcome) is checked in.
+engines/
+
+# Served-model weight caches, if downloaded into the repo tree by mistake.
+data/hf_cache/
