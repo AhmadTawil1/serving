@@ -629,3 +629,111 @@ disabled before any TensorRT-LLM comparison]`
 **Next session:** re-run the A100 FP16 curve with caching off, confirm KV
 utilisation and queue depth are non-trivial this time, then start the
 TensorRT-LLM spike in a **separate runtime**.
+
+---
+
+## Day 6 — Wed 5 Aug 2026 — **A100 baseline, corrected**
+
+Re-ran the vLLM/A100 FP16 curve with prefix caching disabled
+(`git_sha 16f2987`, `prompts_sha 3b3efb02`, model revision `a09a3545` — all
+unchanged from Day 5, so the two curves differ in exactly one setting).
+24/24 records, every one `status: ok`, run-to-run spread ≤ 0.38% at every
+level.
+
+### The card saturates, and it saturates inside the axis
+
+| conc | tok/s | scaling eff. | TTFT p50 | TTFT p95 | TPOT p50 | e2e p50 | goodput req/s |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 81.3 | 100% | 41.8 | 42.4 | 12.07 | 1574 | 0.64 |
+| 2 | 159.9 | 98.4% | 63.7 | 78.3 | 12.10 | 1601 | 1.25 |
+| 4 | 309.1 | 95.0% | 135.7 | 136.6 | 11.96 | 1654 | 2.42 |
+| 8 | 567.7 | 87.3% | 195.4 | 238.2 | 12.63 | 1803 | 4.44 |
+| 16 | 981.2 | 75.4% | 297.5 | 322.2 | 14.09 | 2087 | 7.67 |
+| 32 | 1519.1 | 58.4% | 305.1 | 474.6 | 18.84 | 2697 | 11.81 |
+| 64 | 2111.3 | 40.6% | 385.0 | 563.1 | 27.37 | 3867 | 15.91 |
+| 128 | 2407.1 | **23.1%** | 423.3 | **2409.2** | 49.07 | 6675 | 16.33 |
+
+*(latencies in ms)*
+
+**64 → 128 doubles the offered load and returns 14% more throughput.** On Day
+5's cached run the same step returned 50%. The knee sits between 32 and 64,
+comfortably inside the swept range.
+
+**TTFT at concurrency 1 moved from 21.2 ms to 41.8 ms.** That is the real cost
+of a 512-token prefill on this card; Day 5's figure was a cache lookup, as
+suspected.
+
+### Consequence 1 — the concurrency axis is confirmed, and must not be extended
+
+§3 fixed the axis at 1–128 before any data existed. Day 5's cached curve made
+that look too short (58% efficiency and still climbing at 128). Uncached, it is
+correct: saturation is reached and the top two rungs are already in diminishing
+returns. Adding 256 or 512 would contribute flat points and cost GPU time.
+**Axis unchanged.**
+
+### Consequence 2 — the SLO-respecting range ends at 64
+
+Against §18's working SLO (TTFT < 1000 ms **and** TPOT < 50 ms):
+
+- TTFT p95 crosses 1000 ms between concurrency 64 (563 ms) and 128 (2409 ms).
+- TPOT p50 reaches 49.07 ms at 128, against a 50 ms limit — at the line.
+- Goodput is effectively flat across that step: 15.91 → 16.33 req/s.
+
+So the throughput gained from 64 to 128 is bought almost entirely with latency
+no operator would accept. **Goodput, not raw tokens/sec, is the honest y-axis
+for the operational claim**, with raw throughput reported alongside it (§4.5's
+rule about giving the reader both). Worth stating in §4 rather than leaving the
+reader to notice that the last point on the curve is unusable.
+
+This also sharpens what a crossover would mean: a framework that wins on raw
+throughput at 128 while violating the SLO has not won anything.
+
+### Consequence 3 — prefix caching is a result, not just a control
+
+Holding everything else identical, the ratio of cached to uncached throughput:
+
+| conc | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ON ÷ OFF | 1.01× | 1.03× | 1.07× | 1.14× | 1.28× | 1.53× | 1.94× | **2.56×** |
+
+A framework feature whose value **grows monotonically with concurrency**,
+measured on both settings of a single flag with model, prompts, lengths and
+git SHA all held constant. The published framework comparisons report single
+operating points and would show this as one number, or not at all.
+
+Two caveats to state with it, not after it:
+
+1. The 8-prompt set is an upper bound on realistic reuse. A real workload with
+   diverse prompts would sit somewhere between these two curves, not on the
+   ON one. The honest framing is *"the value of prefix caching under maximal
+   prompt reuse"*, and the ON curve is the ceiling.
+2. It is a vLLM measurement. Whether TensorRT-LLM's prefix reuse behaves the
+   same way is unmeasured, and claiming otherwise would be exactly the
+   framework-attribution error the caching decision was made to avoid.
+
+**Both curves are kept:** `results/vllm_a100_fp16_nocache.jsonl` is the main
+sweep, `results/vllm_a100_fp16_prefixcache_on.jsonl` the caching ceiling.
+This is the block's insurance — a real, defensible figure that exists whether
+or not a TensorRT-LLM engine ever builds.
+
+### Outstanding
+
+`kv_cache_util_pct`, `peak_vram_mb` and `gpu_util_pct` are still `null` in
+every record (§8 requires them). The Day 5 problem was caught by reading the
+server's stdout rather than the records, which is precisely the workflow those
+fields exist to remove. Still not fixed; it matters more on the L4, where KV
+capacity is the binding constraint and the diagnostic is the explanation for
+any flattening.
+
+`framework_version` is also still `null`.
+
+`[outcome: met — the A100 vLLM/FP16 baseline is a saturated, low-variance
+8-point curve with the knee inside the axis. Axis confirmed at 1-128.
+Additionally produced an unplanned prefix-caching result that stands on its
+own]`
+
+**Next session (separate runtime, per the vLLM/TensorRT-LLM environment
+conflict):** the timeboxed TensorRT-LLM install spike. **Find TensorRT-LLM's
+prefix-reuse setting during the spike and confirm it can be disabled** — an
+engine built and swept before that is checked would produce a curve that is
+not comparable to today's, and the mistake would only surface at analysis.
