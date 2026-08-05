@@ -22,3 +22,29 @@ engines/
 
 # Served-model weight caches, if downloaded into the repo tree by mistake.
 data/hf_cache/
+
+# ---------------------------------------------------------------------
+# Working notes, kept private. The repository publishes the measurement,
+# the code that produced it, and the paper -- not the daily process
+# documents behind them.
+# ---------------------------------------------------------------------
+LOG.md
+SCOPE.md
+REFERENCE.md
+M03-SERVING.md
+PAPER.md
+paper/PAPER-framework-draft-superseded.md
+
+# LaTeX build artifacts. main.pdf IS committed (it is the deliverable);
+# everything else regenerates from main.tex. refs.bib is emitted by the
+# filecontents block inside main.tex, so it is generated too.
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.toc
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+paper/refs.bib
