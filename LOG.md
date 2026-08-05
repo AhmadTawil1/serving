@@ -638,7 +638,8 @@ Re-ran the vLLM/A100 FP16 curve with prefix caching disabled
 (`git_sha 16f2987`, `prompts_sha 3b3efb02`, model revision `a09a3545` — all
 unchanged from Day 5, so the two curves differ in exactly one setting).
 24/24 records, every one `status: ok`, run-to-run spread ≤ 0.38% at every
-level.
+level **on this curve** (the figure is for the A100 caching-off run only; the
+worst spread anywhere in the full four-curve grid is 1.66%).
 
 ### The card saturates, and it saturates inside the axis
 
@@ -846,3 +847,208 @@ rewritten before any further measurement]`
 
 **Next session:** L4 runtime, vLLM, prefix caching off then on — the two curves
 that complete the card comparison.
+
+---
+
+## Day 8 — Wed 5 Aug 2026 — **L4 pass. Measurement 03 complete.**
+
+Four curves, 80 records, every one `status: ok`. The measurement is finished.
+The verdict is **refuted**, on the criterion fixed before any data existed, and
+the refutation is more useful than the confirmation would have been.
+
+### First: a bug that produced a plausible, invalid file
+
+The L4 caching-ON sweep was run twice. **The first attempt is discarded.**
+
+`pkill` did not take before the second server launched. vLLM died with
+`OSError: [Errno 98] Address already in use` — and then `wait_healthy` polled
+port 8000, received a 200 from the **caching-OFF server still running**, and
+reported `healthy`. The sweep ran against the previous configuration and wrote
+a file whose `config` block says `prefix caching: on`, because that block is
+built from the launcher's arguments and never from the server's.
+
+**Nothing in the record would have exposed it.** It was caught because the
+ON/OFF ratio came out at exactly **1.00× at all eight concurrency levels** — a
+number too clean to be physical, against measured run-to-run spread of at most
+1.66% anywhere in the 80 records, and 0.004% at concurrency 1.
+
+This is the same failure as Measurement 01's `corpus_sha` false alarm, in a
+different costume: **a check that does not interrogate the thing it claims to
+check.** There, a provenance check called a different function from the one
+that wrote the field. Here, a health probe could not distinguish the server it
+launched from any other process holding the port.
+
+Fixed in `serving/serve_common.py`:
+
+- **`assert_port_free()`** — called *before* launch; refuses to start if
+  anything already answers on the port, with the reason spelled out.
+- **`wait_healthy(..., proc=...)`** — polls `proc.poll()` each iteration and
+  fails immediately if the launched process has exited, rather than trusting
+  whoever answers.
+
+The re-run's log confirms `enable_prefix_caching=True` from vLLM's own banner
+(not just from our launcher's print), a 96.9% hit rate, and no EADDRINUSE.
+
+### Throughput — all four curves
+
+| conc | A100 off | A100 on | A100 ×  | L4 off | L4 on | L4 × |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 81.3 | 82.4 | 1.01x | 17.4 | 17.6 | 1.01x |
+| 2 | 159.9 | 165.0 | 1.03x | 33.4 | 34.4 | 1.03x |
+| 4 | 309.1 | 330.7 | 1.07x | 64.2 | 68.2 | 1.06x |
+| 8 | 567.7 | 648.7 | 1.14x | 118.0 | 133.5 | 1.13x |
+| 16 | 981.2 | 1257.2 | 1.28x | 197.9 | 259.8 | 1.31x |
+| 32 | 1519.1 | 2329.2 | 1.53x | 318.6 | 443.0 | 1.39x |
+| 64 | 2111.3 | 4098.9 | 1.94x | 452.1 | 830.4 | 1.84x |
+| 128 | 2407.1 | 6158.4 | **2.56x** | 524.2 | 1414.2 | **2.70x** |
+
+*(tokens/sec; A100 3 repeats, L4 2 repeats)*
+
+### Verdict: Hypothesis 3 is REFUTED
+
+The pre-registered condition, from `SCOPE.md`:
+
+> **Refuted if.** One configuration leads at every concurrency level on **both**
+> cards, **or** the ranking changes at the same concurrency on both.
+
+**Prefix caching leads at every level on both cards, without exception.** There
+is no ranking change, and therefore no ranking-change point that could move
+with the card. The first clause fires.
+
+The margin at concurrency 1 is 1.01× — a 1.37% gain on the A100 and 1.25% on
+the L4 — against a repeat spread **at that concurrency** of 0.004% and 0.005%
+respectively. Small, but two orders of magnitude above the noise, so it is a
+real if trivial win rather than a tie. Reported as such; not rounded into a tie
+to manufacture a crossover.
+
+*(Spread across the whole grid is larger than at concurrency 1: the worst
+single figure is 1.66% at A100/caching-on/concurrency-16, and 0.525% is the
+worst on the L4. The comparison above uses the concurrency-1 spread because
+that is the level the claim is about. An earlier draft of this entry quoted
+≤0.38% as if it were the global maximum — that figure is the maximum for the
+A100 caching-off curve alone and was wrong as stated. Corrected 5 Aug.)*
+
+**This is a clean refutation, decided by a rule written before the data.** It is
+recorded as the result, not explained away.
+
+### What the data says instead — and it is the better finding
+
+**1. The configuration payoff transfers across a 4.4–5.3× hardware gap.**
+
+The ON/OFF ratio is nearly identical on the two cards at every level: 1.01/1.01,
+1.14/1.13, 1.28/1.31, 1.94/1.84, 2.56/2.70. Same shape, same monotonic climb,
+comparable magnitudes — across cards differing by 4.35–5.26× in throughput
+depending on operating point (4.67× at concurrency 1), 4.3× in
+KV capacity (391,152 vs 91,264 tokens) and 4.3× in maximum concurrent
+full-length requests (190.99× vs 44.56×).
+
+*A practitioner tuning prefix-caching policy on an A100 gets the right answer
+for an L4.* This agrees with Measurement 01's finding that speed ranking largely
+transfers, and Paper 4 now has two independent measurements pointing the same
+way.
+
+**2. Absolute viability does not transfer at all.**
+
+Goodput under the SLO fixed on Day 1 (TTFT < 1000 ms **and** TPOT < 50 ms):
+
+| conc | A100 off | A100 on | L4 off | L4 on | — | TPOT A off | TPOT A on | TPOT L off | TPOT L on |
+|---:|---:|---:|---:|---:|:-:|---:|---:|---:|---:|
+| 1 | 0.64 | 0.64 | **0.00** | **0.00** | | 12.07 | 12.06 | 56.56 | 56.61 |
+| 8 | 4.43 | 5.07 | **0.00** | **0.00** | | 12.63 | 12.12 | 60.88 | 58.92 |
+| 32 | 11.80 | 18.20 | **0.00** | **0.00** | | 18.84 | 13.43 | 87.06 | 65.04 |
+| 64 | 15.91 | 32.02 | **0.00** | **0.00** | | 27.36 | 15.18 | 125.30 | 74.37 |
+| 128 | 16.30 | 48.11 | **0.00** | **0.00** | | 49.08 | 19.88 | 204.57 | 86.51 |
+
+*(goodput req/s; TPOT p50 ms)*
+
+**The L4 serves zero compliant requests at every concurrency level under both
+configurations.** TPOT p50 is 56.56 ms at concurrency 1 — past the 50 ms limit
+before any load arrives. Prefix caching improves it (86.51 ms vs 204.57 ms at
+128) but cannot bring it under the threshold at any point.
+
+The A100 meanwhile reaches 48.11 req/s of goodput at concurrency 128 with
+caching on, and caching raises its goodput at high load by **2.95×**
+(16.30 → 48.11)
+because it holds TPOT at 19.88 ms where the uncached run hits 49.08 ms.
+
+### The sentence this measurement produces
+
+> **The relative recommendation transfers; the absolute viability does not.**
+> The value of prefix caching as a function of concurrency is essentially the
+> same on both cards, so a policy tuned on one transfers to the other. But
+> whether the model can be served *at all* under a fixed SLO is entirely
+> hardware-determined: the A100 complies at every concurrency, the L4 at none.
+
+That is a sharper hardware-dependence claim than the crossover originally
+predicted, and it came out of a refuted hypothesis. Worth saying plainly in §4:
+the study set out to locate a moving crossover, found no crossover at all, and
+the absence is what exposed the distinction between *ranking* transfer and
+*viability* transfer.
+
+### Notes for §5 Threats
+
+- The 8-prompt set makes 96.9% prefix-cache hit rate an **upper bound** on
+  realistic reuse. The caching-ON curves are a ceiling, not a typical workload;
+  a diverse-prompt workload sits between the two curves.
+- The SLO (TTFT < 1000 ms, TPOT < 50 ms) is a working assumption fixed on Day 1
+  (§18). The L4's zero-goodput result is a statement about *this* SLO. At a
+  100 ms TPOT budget the L4 would comply at low concurrency, and that
+  sensitivity should be reported rather than left for a reviewer to raise.
+- L4 curves are 2 repeats, A100 3. Justified by the observed spread; stated.
+- The L4 was swept to concurrency 128 against a measured capacity of 44.56
+  concurrent full-length requests — roughly 2.9× oversubscribed at the top of
+  the axis, which is where the 16.9 s TTFT p95 comes from. Not a broken run; a
+  capacity finding, and it should be labelled as one.
+- `kv_cache_util_pct`, `peak_vram_mb`, `gpu_util_pct`, `framework_version`
+  remain `null` in every record. Still outstanding.
+
+### Verification pass, 5 Aug 2026 — what was re-checked and what was found
+
+Every quantitative claim in this entry was recomputed from the four result
+files rather than carried forward from working notes.
+
+**Passed.** Prefix caching leads at every concurrency level on both cards —
+zero counter-examples in **16** comparisons (8 concurrency levels x 2 cards; an
+earlier draft said 32, which double-counted). All eight ON/OFF ratios match to two
+decimals. L4 goodput is 0.00 at every level under both configurations, with no
+exceptions. Scaling to concurrency 128 is 29.61× (A100) and 30.09× (L4). TPOT
+p50 at concurrency 1 is 12.07 ms (A100) and 56.56 ms (L4), against the SLO of
+`{ttft_ms: 1000, tpot_ms: 50}` stored in the records themselves.
+
+**Controls verified across all four files:** model, model revision
+(`a09a3545…`), `prompts_sha` (`3b3efb02`), `max_model_len`, `input_tokens`,
+`output_tokens` and `greedy` are **identical in all 80 records**. The four
+curves are comparable on every frozen input.
+
+**`git_sha` differs across the four runs** (`fcd053b`, `16f2987`, `562a207`,
+`e3dea24`) because code changed between sessions. Checked what actually
+changed: only `LOG.md`, `SCOPE.md`, `results/*.jsonl`, `scripts/serve_vllm.py`
+and `serving/serve_common.py`. **`client.py`, `sweep.py` and `record.py` — the
+entire measurement path — were untouched across all four curves.** The differing
+SHAs are therefore not a validity problem, and that is now checked rather than
+assumed.
+
+**Corrected.** Three figures in the first draft of this entry were wrong and
+have been fixed above: the run-to-run spread (quoted as ≤0.38%, actually the
+maximum for one curve; the grid maximum is 1.66%), the A100/L4 throughput gap
+(quoted as a flat 4.7×, actually 4.35–5.26× depending on operating point), and
+the goodput improvement at concurrency 128 (described as "triples", actually
+2.95×). None of them changes a conclusion, but all three were stated more
+confidently than the data supported.
+
+**Outstanding provenance gap.** There is no saved server log for the **A100
+caching-off** run, so `enable_prefix_caching=False` is not confirmed from
+vLLM's own banner for that curve, only from the launcher's default at
+`git_sha 16f2987`. The behavioural evidence is strong — throughput differs from
+the caching-on curve by 2.56× at concurrency 128, which a stale-server
+duplication could not produce — but it is inference rather than the direct
+confirmation available for the other three curves. Noted rather than papered
+over, and cheap to close by re-running that curve with the log kept.
+
+`[outcome: refuted -- prefix caching leads at every concurrency level on both
+cards, so no ranking-change point exists to move with hardware. The payoff
+curve transfers closely across a 4.4-5.3x hardware gap, while SLO viability does
+not transfer at all. Measurement 03's data collection is complete]`
+
+**Remaining:** cost normalisation (**prices not yet recorded** — vendor, hourly
+rate, date, one vendor for both cards, §4.5), `analysis.py`, figures, Paper 3.

@@ -1,0 +1,857 @@
+% =====================================================================
+%  Does the best LLM serving configuration depend on the GPU it runs on?
+%  An experiment report.
+%  Ahmad Tawil — ahmadtawil.se@gmail.com
+%
+%  OVERLEAF: upload this file plus the figs/ directory (4 PDFs). The
+%  bibliography is embedded via filecontents, so no separate .bib upload
+%  is needed.
+%  Compile: pdfLaTeX -> BibTeX -> pdfLaTeX -> pdfLaTeX.
+%
+%  EVERY NUMBER IN SECTION 4 IS PRODUCED BY scripts/analysis.py.
+%  If you change the data, re-run it and re-paste; do not edit by hand.
+% =====================================================================
+
+\begin{filecontents*}{refs.bib}
+% ---------------------------------------------------------------------
+% VERIFIED 5 August 2026. Every entry below was checked against its
+% primary source (arXiv abstract page or proceedings listing) during the
+% verification pass described in Section 2. Titles, author lists, venues
+% and identifiers are as confirmed there.
+%
+% One claim was found WRONG during that pass and corrected in Section 2:
+% the programme's reference document attributed to AnyBCQ a finding about
+% relative quantization speedups being preserved across A100 and H100.
+% That claim does not appear in the paper's abstract and is not made by
+% it. See the note on the anybcq entry.
+% ---------------------------------------------------------------------
+
+@article{apex4,
+  author  = {Guo, Hong and Guo, Nianhui and Wang, Weixing and Otholt, Jona
+             and Meinel, Christoph and Yang, Haojin},
+  title   = {{APEX4}: Efficient Pure {W4A4} {LLM} Inference via Intra-{SM}
+             Compute Rebalancing},
+  journal = {arXiv preprint arXiv:2606.08761},
+  year    = {2026},
+  note    = {Hasso Plattner Institute; Green Bit.AI; German University of
+             Digital Science. Verified 5 Aug 2026}
+}
+@inproceedings{anybcq,
+  author    = {Park, Gunho and Bae, Jeongin and Kwon, Beomseok
+               and Kim, Byeongwook and Kwon, Se Jung and Lee, Dongsoo},
+  title     = {{AnyBCQ}: Hardware Efficient Flexible Binary-Coded Quantization
+               for Multi-Precision {LLMs}},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2026},
+  note      = {arXiv:2510.10467. Verified 5 Aug 2026. NOTE: this paper does
+               not claim that relative quantization speedups are preserved
+               across A100 and H100; that attribution was an error in the
+               programme's reference document and has been corrected}
+}
+@inproceedings{qserve,
+  author    = {Lin, Yujun and Tang, Haotian and Yang, Shang and Zhang, Zhekai
+               and Xiao, Guangxuan and Gan, Chuang and Han, Song},
+  title     = {{QServe}: {W4A8KV4} Quantization and System Co-design for
+               Efficient {LLM} Serving},
+  booktitle = {Proceedings of Machine Learning and Systems (MLSys)},
+  year      = {2025},
+  note      = {arXiv:2405.04532. MIT; NVIDIA; MIT-IBM Watson AI Lab;
+               UMass Amherst. Verified 5 Aug 2026}
+}
+@inproceedings{kwon2023vllm,
+  author    = {Kwon, Woosuk and Li, Zhuohan and Zhuang, Siyuan and Sheng, Ying
+               and Zheng, Lianmin and Yu, Cody Hao and Gonzalez, Joseph E.
+               and Zhang, Hao and Stoica, Ion},
+  title     = {Efficient Memory Management for Large Language Model Serving
+               with {PagedAttention}},
+  booktitle = {Proceedings of the ACM SIGOPS 29th Symposium on Operating
+               Systems Principles (SOSP)},
+  year      = {2023},
+  note      = {arXiv:2309.06180. Verified 5 Aug 2026}
+}
+@misc{tensorrtllm,
+  author = {{NVIDIA}},
+  title  = {{TensorRT-LLM}},
+  year   = {2026},
+  note   = {Version 1.2.1, as installed on 5 Aug 2026. Cited for the
+            toolchain refusal in Section 3.8 only}
+}
+@article{qwen25,
+  author  = {{Qwen Team}},
+  title   = {{Qwen2.5} Technical Report},
+  journal = {arXiv preprint arXiv:2412.15115},
+  year    = {2024},
+  note    = {Model \texttt{Qwen/Qwen2.5-7B-Instruct}, revision
+             \texttt{a09a35458c702b33eeacc393d103063234e8bc28}.
+             Verified 5 Aug 2026}
+}
+\end{filecontents*}
+
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage{caption}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[hidelinks,breaklinks]{hyperref}
+
+\newcommand{\hs}[1]{{\small\ttfamily #1}}
+\newcommand{\x}{$\times$}
+% keepspaces + columns=fixed: without these, listings collapse runs of spaces
+% and destroy any column alignment inside a code block.
+\lstset{basicstyle=\footnotesize\ttfamily, frame=single, framesep=3pt,
+        breaklines=true, columns=fixed, keepspaces=true, basewidth=0.5em,
+        xleftmargin=3.4pt, xrightmargin=3.4pt,
+        aboveskip=7pt, belowskip=7pt}
+\captionsetup{font=small,labelfont=bf}
+\setlength{\parskip}{0.3em}
+
+\title{\bfseries Does the best LLM serving configuration\\depend on the GPU it runs on?\\[4pt]
+       \large\normalfont An experiment report}
+\author{Ahmad Tawil\\\small\texttt{ahmadtawil.se@gmail.com}}
+\date{5 August 2026}
+
+\begin{document}
+\maketitle
+
+% =====================================================================
+\begin{abstract}
+\noindent
+When you run a large language model as a service, you have to choose settings.
+One of them is whether the server should remember work it has already done, so
+that repeated parts of a request are not computed twice. Turning that on makes
+the server faster. The question is by how much, and whether the answer changes
+if you run the same server on a cheaper graphics card.
+
+I measured it. I ran the same model, the same requests and the same settings on
+two graphics cards --- an expensive A100 and a cheap L4 --- and turned that one
+setting on and off. I did this at eight levels of how busy the server was, from
+one user at a time up to 128.
+
+Two things came out, and they point in opposite directions.
+
+\textbf{The setting behaves the same way on both cards.} With one user it barely
+helps: about 1\% faster. As the server gets busier it helps more and more, up to
+2.56 times faster on the expensive card and 2.70 times on the cheap one. Those
+numbers are close, and they stay close at every level in between. So if you work
+out the best setting on one card, that answer carries over to the other card.
+That is not what I predicted --- I predicted the two cards would disagree
+somewhere --- so the prediction I registered in advance is \textbf{refuted}.
+
+\textbf{But the cheap card cannot do the job at all.} Before running anything I
+fixed a speed requirement: each word of the reply should take under 50
+milliseconds. The expensive card meets it everywhere. The cheap card never meets
+it --- not at any level of load, not with the setting on or off. It is already
+too slow with a single user.
+
+So the \emph{advice} transfers between the two cards, but \emph{whether a card
+can be used at all} does not. How to configure the server is a question you can
+answer on any card. Whether to buy the cheap card is not.
+
+I also tried to compare two different serving programs, vLLM and TensorRT-LLM.
+TensorRT-LLM installed but would not start: it needs a graphics library that is
+not available for the machine it was installed on. I report that as a result
+rather than leaving it out, because it is a real cost of choosing that program.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+
+Serving an LLM in production means choosing a configuration: how much of the GPU
+to give to the key--value cache, how many requests to schedule at once, whether
+to reuse cached computation across requests that share a prefix. These choices
+are made once, usually by benchmarking on whatever GPU the team has, and then
+carried onto whatever hardware turns out to be affordable.
+
+Whether that carry-over is safe has not been systematically tested. If it is
+not, every published tuning recommendation has an unstated hardware
+precondition attached to it.
+
+This measurement asks: \textbf{does the best vLLM serving configuration depend
+on the GPU, and does the answer change with how loaded the server is?}
+
+\paragraph{Hypothesis 3, registered before any measurement.}
+From \hs{SCOPE.md}, committed 5 August 2026:
+
+\begin{quote}\itshape
+The optimal vLLM configuration is concurrency-dependent --- no single
+configuration leads across the whole load range --- and the concurrency at which
+the ranking changes depends on the card, arriving at a different point on the L4
+than on the A100, because a card with less memory bandwidth and less KV capacity
+is rewarded differently by the same setting.
+\end{quote}
+
+\noindent\textbf{Refuted if} one configuration leads at every concurrency level
+on both cards, \textbf{or} the ranking changes at the same concurrency on both.
+
+The refutation condition fired. Section~\ref{sec:results} reports it, and reports
+what the data says instead --- which turns out to be a sharper claim than the one
+I predicted.
+
+\subsection{Contribution}
+\begin{enumerate}\itemsep2pt
+\item Four complete concurrency curves ($1\rightarrow128$; 3 repeats on the
+      A100, 2 on the L4; 80 records, all successful) for one pinned model on two
+      GPU tiers, with the prefix-caching knob swept and every other input frozen
+      and hashed.
+\item A \textbf{quantified transfer result}: the payoff from prefix caching as a
+      function of load is nearly identical on two cards differing by
+      4.35--5.26\x{} in throughput.
+\item A \textbf{non-transfer result} from the same records: the L4 fails the
+      registered SLO at every concurrency level under both configurations, while
+      the A100 meets it at every level. Ranking transfers; viability does not.
+\item A reported toolchain refusal: TensorRT-LLM 1.2.1 installs but cannot load
+      its own bindings on the target runtime, with the error and the attempted
+      remedies.
+\end{enumerate}
+
+% =====================================================================
+\section{Related work}
+
+\paragraph{Hardware-dependent efficiency is established at the kernel level, and
+that is deliberately not what this measures.}
+APEX4~\citep{apex4} is the closest prior work to this programme's thesis. It
+identifies the Tensor-Core to CUDA-Core throughput ratio $\rho$ as the primary
+hardware indicator governing W4A4 quantization efficiency, and reports that the
+same W4A4-g128 kernel yields 2.0--2.5\x{} speedup on an RTX 3090
+($\rho = 16$) yet degrades to 0.43--0.47\x{} on an A100 ($\rho = 64$) in
+compute-bound scenarios --- establishing W4A4 viability as \emph{platform-dependent
+rather than universally infeasible}. That is the kernel-level version of the
+question asked here, and it constrains the contribution: that angle is taken.
+
+Two further works occupy the surrounding space.
+QServe~\citep{qserve} co-designs a W4A8KV4 quantization algorithm with a serving
+system, and reports 2.4--3.5\x{} higher throughput than TensorRT-LLM on A100 and
+L40S. AnyBCQ~\citep{anybcq} extends binary-coded quantization to multi-precision
+inference with direct bit-plane operations, reporting throughput gains of up to
+3.0\x{} over half precision and 1.2\x{} over prior multi-precision methods.
+
+Notably, APEX4 deploys its kernels as a drop-in replacement inside
+\emph{unmodified} vLLM. The framework layer is treated throughout this
+literature as a fixed substrate rather than as an object of study.
+
+\paragraph{What remains thin} is framework- and configuration-level behaviour
+\emph{under load}. Public comparisons are vendor blog posts reporting a single
+operating point, rarely cost-normalised and rarely repeated.
+
+\begin{quote}
+\textbf{Gap.} Whether a serving configuration's benefit changes with
+concurrency, and whether that behaviour transfers across hardware tiers, is
+unmeasured.
+\end{quote}
+
+\begin{quote}\small
+\textbf{On the citations.} All six references were checked against their primary
+sources on 5 August 2026 rather than carried forward from the programme's
+reference document. That pass found one error: the reference document
+attributed to AnyBCQ a finding that relative quantization speedups are preserved
+across A100 and H100. \textbf{AnyBCQ makes no such claim}, and an earlier draft
+of this section repeated it. The description above is what the paper's abstract
+actually states. Measurement 01 contained a citation error of the same class ---
+a model cited to its dataset rather than to its architecture --- which is why
+this pass was run at all.
+\end{quote}
+
+% =====================================================================
+\section{Method}
+
+\subsection{System under test}
+The system under test is one vLLM server~\citep{kwon2023vllm} (v0.26.0) behind
+its OpenAI-compatible completions endpoint. It serves
+\hs{Qwen/}\allowbreak\hs{Qwen2.5-7B-}\allowbreak\hs{Instruct} \citep{qwen25},
+pinned through \hs{serving/pins.py} to revision \hs{a09a3545\ldots} (full hash
+in the bibliography) and stamped into every result record.
+
+The model was chosen over an 8B Llama-class alternative for two reasons, both
+checked rather than assumed. It is ungated, so reproduction does not depend on
+one account's licence acceptance. And its grouped-query attention uses 4 KV
+heads against Llama-3.1-8B's 8, roughly halving KV-cache footprint per token ---
+which is what makes concurrency 128 fit on a 24\,GB L4 at all. The arithmetic
+sits in \hs{serving/config.py} beside the constants it justifies.
+
+The model is natively bf16 and is served in fp16 (\hs{--dtype float16}). vLLM
+logs this cast explicitly; it is a scope decision, not an accident.
+
+\subsection{The swept configuration}
+
+\begin{table}[h]\centering\small
+\begin{tabular}{ll}
+\toprule
+Axis & Levels\\
+\midrule
+Prefix caching & on / off\\
+Card & A100-SXM4-40GB $\cdot$ L4 24\,GB\\
+Concurrency & 1 $\cdot$ 2 $\cdot$ 4 $\cdot$ 8 $\cdot$ 16 $\cdot$ 32 $\cdot$ 64 $\cdot$ 128\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Four curves, eight points each. Three repeats per point on the A100, two on the
+L4 (Section~\ref{sec:repro}).
+
+\paragraph{Held fixed, and verified identical across all 80 records} by
+\hs{analysis.py}'s integrity check rather than assumed: model; model revision
+\hs{a09a3545\ldots}; prompt set \hs{prompts\_sha 3b3efb02\ldots}; 512 input
+tokens; 128 output tokens forced with \hs{min\_tokens}; max model length 2048;
+greedy sampling at \hs{temperature=0}; fp16.
+
+Forcing the output length matters more than it looks. If one configuration
+produced shorter replies, its time-per-output-token would improve for free and
+the comparison would be void.
+
+\paragraph{Two vLLM defaults were left at their defaults} and are reported as
+configuration rather than swept: chunked prefill (on) and asynchronous
+scheduling (on). Both affect the shape of a concurrency curve. Both are constant
+across all four curves, so neither can explain any difference reported here ---
+but they do mean the absolute numbers describe vLLM at its defaults, not a tuned
+server.
+
+\subsection{Workload}
+\label{sec:workload}
+Eight prompts, each padded to exactly 512 tokens under the pinned model's own
+tokenizer, frozen to \hs{data/prompts.json} and hashed.
+
+\paragraph{The prompt set is small, and that is load-bearing for reading the
+caching-on curves.} A 60-second window at concurrency 128 issues roughly 2,900
+requests, so each of the eight prompts is reused hundreds of times and the
+measured prefix-cache hit rate reaches \textbf{96.9\%}. The caching-on curves
+are therefore an \emph{upper bound} --- the ceiling under maximal prompt reuse,
+not a typical production workload. A workload with diverse prompts would sit
+between the two curves. Section~\ref{sec:threats} returns to this.
+
+This was not the original design. The first A100 curve was collected with vLLM's
+default (caching on), and the 96.9\% hit rate was discovered afterwards from the
+server's own log --- at which point the card was found to be running at 5.2\%
+KV-cache utilisation with zero queue depth at concurrency 128, i.e.\ never
+loaded. Caching-off curves were added, the knob became the study's axis, and
+both regimes are reported.
+
+\subsection{Harness and measurement}
+
+\paragraph{Closed-loop load.} $N$ asynchronous workers, each holding exactly one
+request in flight: send, await the full streamed response, send the next.
+In-flight count is exactly $N$ at all times, which is what ``concurrency $N$''
+means throughout. Open-loop (fixed arrival rate) is the other valid design but
+produces queue collapse above saturation, which would bury configuration
+differences in queueing delay.
+
+\paragraph{Latency is measured client-side, on the stream.} Three timestamps are
+taken per request, all in the client:
+
+\begin{table}[h]\centering\small
+\begin{tabular}{ll}
+\toprule
+$t_0$ & the request is sent\\
+$t_1$ & the first streamed chunk arrives\\
+$t_2$ & the last streamed chunk arrives\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent From those, with $n$ the number of output tokens in the response:
+
+\begin{align}
+\mathrm{TTFT} &= t_1 - t_0\\[2pt]
+\mathrm{TPOT} &= \frac{t_2 - t_1}{n - 1}
+\end{align}
+
+TTFT is the wait before any text appears. TPOT is the mean interval between
+consecutive output tokens thereafter.
+
+The denominator is $n-1$, not $n$. The first token's arrival is already charged
+to TTFT; only the remaining $n-1$ tokens arrive during the interval
+$t_2 - t_1$, so there are $n-1$ gaps to average over. Dividing by $n$ instead
+would understate TPOT --- and it would understate it equally for every
+configuration, which is the kind of error that survives review because it
+cancels out of every ratio in Section~\ref{sec:results}.
+
+\paragraph{Warmup.} 32 discarded requests at the target concurrency --- not at
+concurrency 1 --- before a fixed 60-second measurement window. First requests
+trigger CUDA graph capture and lazy kernel compilation; those are engine
+artifacts, not steady state.
+
+\paragraph{The load generator was validated before any real number was trusted.}
+A client unable to sustain 128 concurrent streams would produce a flat curve
+that looks like server saturation. The full sweep was therefore run against a
+mock server returning a canned stream on a fixed sleep. Throughput tracked
+linearly with concurrency across the whole range (ratio to linear 0.93--1.06, no
+downward trend at the top of the axis) and client CPU never exceeded 51\% mean.
+Under real load client CPU peaked at 22.8\%.
+
+\paragraph{One record per repeat.} Records are aggregated at read time, so
+run-to-run spread stays recoverable. Every record carries GPU, driver, CUDA
+version, torch version, git SHA, model revision and \hs{prompts\_sha}.
+
+\subsection{Hardware and software}
+Colab Pro. \textbf{A100-SXM4-40GB} and \textbf{L4 24\,GB}, driver 580.82.07,
+host CUDA 13.0, \hs{torch 2.11.0+cu128}, \hs{vllm 0.26.0}.
+
+Measured KV-cache capacity, as reported by vLLM at startup:
+
+\begin{table}[h]\centering\small
+\begin{tabular}{lrr}
+\toprule
+Card & KV cache & Max concurrent 2048-token requests\\
+\midrule
+A100-SXM4-40GB & 391{,}152 tokens & 190.99\x\\
+L4 24\,GB      &  91{,}264 tokens &  44.56\x\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The L4 was swept to concurrency 128 against a capacity of 44.56 --- roughly
+2.9\x{} oversubscribed at the top of the axis. That is deliberate, and it is
+where the L4's 16.9-second TTFT p95 at concurrency 128 comes from.
+
+\paragraph{Installation was not free, and the friction is reportable.} vLLM's
+PyPI wheel ships CUDA 13 binaries while the runtime's torch was a CUDA 12.8
+build; \hs{import vllm} failed with \hs{ImportError: libcudart.so.13}. The
+library was present on disk (\hs{nvidia-cuda-runtime 13.3.29}) but its directory
+was not registered with the dynamic loader. Registering it with \hs{ldconfig}
+fixed the import without reinstalling anything. Framework installation being
+coupled to a CUDA version the user does not control is a real constraint on
+rented infrastructure, and it is absent from the published framework
+comparisons.
+
+\subsection{Metric definitions}
+
+\begin{table}[h]\centering\small
+\begin{tabular}{ll}
+\toprule
+Metric & Definition\\
+\midrule
+Output tokens/sec & total output tokens $\div$ measurement window, all concurrent requests\\
+TTFT p50 / p95 & client-side, request sent $\rightarrow$ first streamed chunk\\
+TPOT p50 / p95 & client-side, (last $-$ first chunk) $\div$ (output tokens $-$ 1)\\
+Goodput & requests/sec completing under the SLO\\
+Tokens per dollar-hour & output tokens/sec $\div$ host hourly price\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{SLO: TTFT $<$ 1000\,ms and TPOT $<$ 50\,ms.} Both thresholds were fixed
+on the first day of the block, before any measurement, and are not revised.
+Section~\ref{sec:threats} reports how the conclusion moves if the TPOT threshold
+is relaxed.
+
+Percentiles, never means: TTFT and TPOT distributions are right-skewed, and a
+mean TTFT is a misleading number.
+
+\subsection{Reproduction}
+\label{sec:repro}
+
+\begin{lstlisting}
+python scripts/serve_vllm.py --card A100-SXM4-40GB --precision fp16
+#   add --prefix-caching for the ON curve
+python scripts/sweep.py --base-url http://localhost:8000 \
+    --framework vllm --card A100-SXM4-40GB --precision fp16 \
+    --window-s 60 --repeats 3 --warmup-requests 32 --out results/<name>.jsonl
+python scripts/analysis.py --emit markdown
+python scripts/plot_results.py
+\end{lstlisting}
+
+\paragraph{Every number in Section~\ref{sec:results} is printed by
+\hs{analysis.py} from the result files.} No figure in this paper is typed by
+hand. This is a direct response to a verification pass which found three numbers
+in the working notes stated more confidently than the data supported: a
+run-to-run spread quoted for one curve and applied to four, a throughput ratio
+quoted as a single value when it varied across operating points, and a
+``triples'' that was 2.95\x. None changed a conclusion; all three were prose
+drifting from the data it described. The remedy is mechanical rather than a
+resolution to be more careful.
+
+\paragraph{Repeat counts differ by card} --- 3 on the A100, 2 on the L4. The
+reduction was a deliberate budget decision taken after the A100 curves showed
+run-to-run spread of at most 1.66\% anywhere and 0.004\% at concurrency 1.
+Stated rather than hidden.
+
+\paragraph{The four curves were collected at four different git SHAs}
+(\hs{16f2987}, \hs{fcd053b}, \hs{562a207}, \hs{e3dea24}) because code changed
+between sessions. The diffs were checked: only log files, scope files, result
+files and the two server-launch scripts changed. \hs{client.py}, \hs{sweep.py}
+and \hs{record.py} --- the entire measurement path --- were untouched across all
+four curves.
+
+\subsection{What was attempted and abandoned}
+\label{sec:abandoned}
+
+The study was originally designed as a \textbf{framework} comparison: vLLM
+against TensorRT-LLM~\citep{tensorrtllm}, across the same two cards and the same
+concurrency axis. That axis was dropped, and dropping it was governed by a rule
+written before it became inconvenient.
+
+\hs{SCOPE.md}, committed on the block's first day, specified a hard stop: if
+neither card's TensorRT-LLM engine was serving by the end of the fourth day, the
+framework axis would be dropped entirely and a named contingency --- the vLLM
+configuration axis --- would run instead. A 30-minute timeboxed spike was
+scheduled on the first day precisely so the answer would be cheap.
+
+\paragraph{The spike failed, inside its budget.} TensorRT-LLM 1.2.1 installed
+successfully in 266 seconds, downgrading torch to 2.9.1 in the process, and
+then:
+
+\begin{lstlisting}
+File "tensorrt_llm/_utils.py", line 47, in <module>
+    from tensorrt_llm.bindings import DataType, GptJsonConfig, LayerType
+ImportError: libcublasLt.so.13: cannot open shared object file:
+             No such file or directory
+\end{lstlisting}
+
+Three remedies were attempted and all failed: registering every NVIDIA library
+directory with \hs{ldconfig} (the library is genuinely absent, not misplaced);
+\hs{pip install nvidia-cublas-cu13} from PyPI (\hs{Failed building wheel} --- the
+entry has no binary); and the same from NVIDIA's own index, with identical
+failure. No engine build was attempted on either card, so \textbf{no build-time
+data exists and none is claimed}.
+
+Two things here are results rather than mishaps:
+
+\begin{enumerate}\itemsep2pt
+\item \textbf{Both frameworks shipped CUDA 13 binaries onto a CUDA 12.8 host and
+      both failed at the dynamic loader.} vLLM's missing dependency was present
+      and merely unregistered --- recoverable in one line. TensorRT-LLM's was
+      absent with no installable source. Same failure mode, opposite outcomes.
+\item \textbf{TensorRT-LLM 1.2.1 pins torch 2.9.1; vLLM 0.26.0 requires torch
+      2.11.0.} The two frameworks cannot share an environment. Running both
+      means two installations, two CUDA stacks and two instances of this class
+      of problem --- an operational cost that framework comparisons do not
+      report.
+\end{enumerate}
+
+The thesis question is unaffected by the swap, because it was never \emph{which
+framework wins}; it is whether the answer depends on the hardware. A
+configuration axis tests that as directly.
+
+% =====================================================================
+\section{Results}
+\label{sec:results}
+
+All numbers below are \hs{analysis.py} output. 80 records, all
+\hs{status: ok}, controls verified identical across all four curves.
+
+\subsection{Throughput, and the payoff from prefix caching}
+
+\begin{table}[h]\centering\small
+\caption{Output tokens/sec, and the ratio of caching-on to caching-off.
+Worst run-to-run spread anywhere in the grid: 1.66\% (A100 caching-on,
+concurrency 16). At concurrency 1 the spreads are 0.004\% (A100 off),
+0.004\% (A100 on), 0.005\% (L4 off), 0.001\% (L4 on).}
+\begin{tabular}{rrrrrrr}
+\toprule
+Conc. & A100 off & A100 on & L4 off & L4 on & A100 on/off & L4 on/off\\
+\midrule
+1   & 81.3   & 82.4   & 17.4  & 17.6   & 1.01\x & 1.01\x\\
+2   & 159.9  & 165.0  & 33.4  & 34.4   & 1.03\x & 1.03\x\\
+4   & 309.1  & 330.7  & 64.2  & 68.2   & 1.07\x & 1.06\x\\
+8   & 567.7  & 648.7  & 118.0 & 133.5  & 1.14\x & 1.13\x\\
+16  & 981.2  & 1257.2 & 197.9 & 259.8  & 1.28\x & 1.31\x\\
+32  & 1519.1 & 2329.2 & 318.6 & 443.0  & 1.53\x & 1.39\x\\
+64  & 2111.3 & 4098.9 & 452.1 & 830.4  & 1.94\x & 1.84\x\\
+128 & 2407.1 & 6158.4 & 524.2 & 1414.2 & \textbf{2.56\x} & \textbf{2.70\x}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.72\textwidth]{figs/fig1_throughput.pdf}
+\caption{Throughput against concurrency, all four curves. Solid = prefix
+caching on, dashed = off. Blue = A100, amber = L4.}
+\end{figure}
+
+\subsection{Verdict: Hypothesis 3 is refuted}
+
+Prefix caching leads at \textbf{every} concurrency level on \textbf{both} cards
+--- 16 comparisons, zero counter-examples. There is no ranking change, and
+therefore no ranking-change point that could move with the card. The first
+clause of the registered refutation condition fires.
+
+The margin at concurrency 1 is small --- a 1.37\% gain on the A100 and 1.25\% on
+the L4 --- but repeat spread at that concurrency is 0.004\% and 0.005\%, so the
+gain is two orders of magnitude above the noise. It is a real if trivial win,
+reported as such rather than rounded into a tie to manufacture a crossover.
+
+\subsection{The payoff transfers across hardware tiers}
+
+\begin{table}[h]\centering\small
+\caption{The two ratio columns of Table~1, read side by side.}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Conc. & 1 & 2 & 4 & 8 & 16 & 32 & 64 & 128\\
+\midrule
+A100 & 1.01\x & 1.03\x & 1.07\x & 1.14\x & 1.28\x & 1.53\x & 1.94\x & 2.56\x\\
+L4   & 1.01\x & 1.03\x & 1.06\x & 1.13\x & 1.31\x & 1.39\x & 1.84\x & 2.70\x\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Same shape, same monotonic climb, comparable magnitudes at every level --- across
+cards differing by 4.35--5.26\x{} in raw throughput (4.67\x{} at concurrency 1)
+and 4.3\x{} in KV-cache capacity.
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.72\textwidth]{figs/fig2_payoff.pdf}
+\caption{\textbf{The headline result.} Prefix-caching payoff against
+concurrency, per card. The two lines lie almost on top of each other across a
+4.35--5.26\x{} hardware gap. No price assumption and no derived quantity enters
+this figure.}
+\end{figure}
+
+The practical reading: \emph{a practitioner who determines prefix-caching policy
+on an A100 gets the right answer for an L4.} This agrees with Measurement 01's
+finding that most of the latency ranking transfers across the same two cards
+(Kendall $\tau = 0.80$), and the two measurements are independent.
+
+\subsection{But viability does not transfer at all}
+\label{sec:viability}
+
+\begin{table}[h]\centering\small
+\caption{TPOT p50 (ms) and goodput (req/s) under the registered SLO
+(TTFT $<$ 1000\,ms \emph{and} TPOT $<$ 50\,ms).}
+\begin{tabular}{rrrrrcrrrr}
+\toprule
+& \multicolumn{4}{c}{TPOT p50 (ms)} & & \multicolumn{4}{c}{Goodput (req/s)}\\
+\cmidrule(lr){2-5}\cmidrule(lr){7-10}
+Conc. & A100 off & A100 on & L4 off & L4 on & & A100 off & A100 on & L4 off & L4 on\\
+\midrule
+1   & 12.07 & 12.06 & 56.56  & 56.61 & & 0.64  & 0.64  & \textbf{0.00} & \textbf{0.00}\\
+2   & 12.10 & 11.97 & 58.13  & 57.68 & & 1.25  & 1.29  & \textbf{0.00} & \textbf{0.00}\\
+4   & 12.03 & 11.95 & 58.03  & 58.10 & & 2.41  & 2.58  & \textbf{0.00} & \textbf{0.00}\\
+8   & 12.63 & 12.12 & 60.88  & 58.92 & & 4.43  & 5.07  & \textbf{0.00} & \textbf{0.00}\\
+16  & 14.09 & 12.42 & 67.71  & 60.37 & & 7.67  & 9.82  & \textbf{0.00} & \textbf{0.00}\\
+32  & 18.84 & 13.43 & 87.06  & 65.04 & & 11.80 & 18.20 & \textbf{0.00} & \textbf{0.00}\\
+64  & 27.36 & 15.18 & 125.30 & 74.37 & & 15.91 & 32.02 & \textbf{0.00} & \textbf{0.00}\\
+128 & 49.08 & 19.88 & 204.57 & 86.51 & & 16.30 & 48.11 & \textbf{0.00} & \textbf{0.00}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{The L4 serves zero SLO-compliant requests at every concurrency level
+under both configurations.} TPOT p50 is 56.56\,ms at concurrency 1 --- past the
+50\,ms limit before any load arrives. Caching improves it substantially at high
+load (86.51\,ms against 204.57\,ms at concurrency 128) but never brings it under
+the threshold.
+
+On the A100 the same knob is worth 2.95\x{} in goodput at concurrency 128
+(16.30 $\rightarrow$ 48.11), because it holds TPOT at 19.88\,ms where the
+uncached configuration reaches 49.08\,ms and begins to fail.
+
+\begin{figure}[h]\centering
+\includegraphics[width=\textwidth]{figs/fig3_slo.pdf}
+\caption{Left: per-token latency against the SLO ceiling. Right: goodput. Both
+L4 curves sit flat on zero at every concurrency level.}
+\end{figure}
+
+So the same setting plays a different \emph{kind} of role on each card. On the
+A100 it is a throughput optimisation. On the L4 it more than halves per-token
+latency and still leaves the card unusable under this SLO.
+
+\subsection{Cost, and why the cost claim is weak}
+\label{sec:cost}
+
+\begin{table}[h]\centering\small
+\caption{Cost-normalised throughput (output tokens/sec per dollar-hour) at GCP
+list on-demand prices of \$3.67/hr (A100 40\,GB) and \$0.70/hr (L4).
+\textbf{These prices are not measured} --- see Section~\ref{sec:threats}.}
+\begin{tabular}{rrrrrrr}
+\toprule
+Conc. & A100 off & L4 off & L4/A100 & A100 on & L4 on & L4/A100\\
+\midrule
+1   & 22.2  & 24.9  & 1.12\x & 22.5   & 25.2   & 1.12\x\\
+2   & 43.6  & 47.7  & 1.09\x & 45.0   & 49.1   & 1.09\x\\
+4   & 84.2  & 91.7  & 1.09\x & 90.1   & 97.4   & 1.08\x\\
+8   & 154.7 & 168.6 & 1.09\x & 176.8  & 190.7  & 1.08\x\\
+16  & 267.4 & 282.7 & 1.06\x & 342.6  & 371.2  & 1.08\x\\
+32  & 413.9 & 455.1 & 1.10\x & 634.7  & 632.9  & 1.00\x\\
+64  & 575.3 & 645.8 & 1.12\x & 1116.9 & 1186.3 & 1.06\x\\
+128 & 655.9 & 748.9 & 1.14\x & 1678.0 & 2020.3 & 1.20\x\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At these prices the L4 delivers 6--20\% more tokens per dollar at every level.
+\textbf{That ordering is not robust.}
+
+\begin{table}[h]\centering\small
+\caption{Break-even A100 price, holding the L4 at \$0.70/hr. Above it the L4 is
+cheaper per token; below it the A100 is.}
+\begin{tabular}{lr}
+\toprule
+Configuration & Break-even A100 price\\
+\midrule
+caching off & \$3.21 -- \$3.47 /hr\\
+caching on  & \$3.05 -- \$3.68 /hr\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The assumed A100 price of \$3.67/hr sits barely above that range. A $\pm10\%$
+price swing in the unfavourable direction reverses the ordering (worst-case
+minimum ratio 0.87\x{} caching-off, 0.82\x{} caching-on); even $\pm5\%$ reverses
+it at some levels.
+
+\begin{figure}[h]\centering
+\includegraphics[width=\textwidth]{figs/fig4_cost.pdf}
+\caption{Left: cost-normalised throughput. Right: the break-even A100 price at
+each concurrency level, against the assumed price, so a reader can check it
+against their own contract rather than inheriting mine.}
+\end{figure}
+
+The honest statement is therefore:
+
+\begin{quote}
+At GCP list on-demand prices the L4 delivers 6--20\% more tokens per dollar, but
+the break-even A100 price is \$3.05--\$3.68/hr and the ordering does not survive
+a $\pm10\%$ price swing. The cost comparison is too close to call without
+contract prices.
+\end{quote}
+
+% =====================================================================
+\section{Threats to validity}
+\label{sec:threats}
+
+\paragraph{Prices are secondary-sourced.} The \$3.67 and \$0.70 figures come
+from third-party summaries of GCP list pricing, not from Google's own page,
+which lists the A100 40\,GB only as part of \hs{a2-highgpu} machine types rather
+than as a standalone GPU line item. Every cost conclusion in
+Section~\ref{sec:cost} inherits that uncertainty, which is why the break-even
+and the sensitivity analysis are reported alongside the ratio rather than
+instead of it.
+
+\paragraph{The prompt set is eight prompts, and the caching-on curves are a
+ceiling.} The measured 96.9\% prefix-cache hit rate is an upper bound on
+realistic reuse. A production workload with diverse prompts would sit between
+the two curves. The transfer result is a statement about how the \emph{ceiling}
+behaves on two cards, not about a typical workload.
+
+\paragraph{The SLO is a working assumption, and the L4 conclusion is sensitive
+to it.}
+
+\begin{table}[h]\centering\small
+\caption{Median-request compliance across TPOT budgets. Computed from stored p50
+latencies, so this reports whether the \emph{median} request complies, not true
+goodput at each threshold --- the records do not retain per-request latencies.}
+\begin{tabular}{lllll}
+\toprule
+TPOT budget & A100 off & A100 on & L4 off & L4 on\\
+\midrule
+50\,ms  & all levels & all levels & never & never\\
+75\,ms  & all & all & never & up to 64\\
+100\,ms & all & all & up to 8 & all levels\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At a 100\,ms budget the L4 becomes viable at every concurrency --- \textbf{but
+only with caching on}. Without it the L4 fails above concurrency 8. That is a
+stronger form of Section~\ref{sec:viability}'s claim: at some latency budgets
+the configuration is not an optimisation on the L4 but a precondition for using
+the card at all.
+
+\paragraph{One curve's configuration is not confirmed by the server's own log.}
+The A100 caching-off run's log was not saved, so
+\hs{enable\_prefix\_caching=False} for that curve rests on the launcher's
+default at that git SHA rather than on vLLM's startup banner, which is available
+for the other three. The behavioural evidence is strong --- the curve differs
+from the caching-on curve by 2.56\x{} at concurrency 128 --- but it is
+inference.
+
+This matters because a closely related failure did occur. During the L4 pass a
+server was launched onto an occupied port, died with \hs{EADDRINUSE}, and the
+health check was then answered by the \emph{previous} server; the resulting file
+was a valid-looking duplicate of the run it was meant to be compared against. It
+was caught only because the on/off ratio came out at exactly 1.00\x{} at all
+eight levels --- too clean to be physical. \hs{serve\_common.py} now refuses to
+launch onto an occupied port and fails if the launched process exits, but the
+A100 curve predates that guard.
+
+\paragraph{Single provider, shared hardware.} All runs are on Colab Pro, where
+hardware is shared and the exact host configuration is not under the user's
+control. Absolute throughput figures should be read as indicative. The ratios
+--- which are the contribution --- are internally consistent, because both
+members of each ratio were measured in the same session on the same allocation.
+
+\paragraph{Two vLLM defaults were not swept.} Chunked prefill and asynchronous
+scheduling were left on. Both affect a concurrency curve's shape. They are
+constant across all four curves so they cannot explain any reported difference,
+but the absolute numbers describe vLLM at its defaults.
+
+\paragraph{One model, one size, one sequence-length pair.} 512 input / 128
+output tokens sets the prefill-to-decode balance, and a different pair would
+move the numbers. Not swept; stated as a scope limit.
+
+\paragraph{Repeat counts differ across cards} --- 3 on the A100, 2 on the L4 ---
+as a deliberate budget decision taken after observing spread of at most 1.66\%.
+
+\paragraph{Missing instrumentation.} \hs{kv\_cache\_util\_pct},
+\hs{peak\_vram\_mb}, \hs{gpu\_util\_pct} and \hs{framework\_version} are
+\hs{null} in every record. KV-cache utilisation is precisely the diagnostic that
+would have surfaced the Section~\ref{sec:workload} prefix-caching problem
+automatically, instead of requiring the server's stdout to be read by hand.
+
+\paragraph{The programme this belongs to has two completed measurements, not
+three.} Measurement 02 (video ingestion) was scoped, tooled, and halted at its
+annotation step; its log records why. Measurement 03 was chosen to follow it
+specifically because its ground truth is machine-generated and the failure that
+stopped Measurement 02 could not recur.
+
+% =====================================================================
+\section{Conclusion}
+
+I set out to find a point where the best serving configuration changes with
+load, and to show that the point moves with the GPU. Neither happened. Prefix
+caching wins at every concurrency level on both cards, so the pre-registered
+hypothesis is refuted on its own terms.
+
+What the data shows instead is a cleaner distinction than the one I predicted.
+The \emph{benefit} of the configuration transfers almost exactly across a
+4.35--5.26\x{} hardware gap: 1.01\x{} at concurrency 1 rising to 2.56\x{} on the
+A100 and 2.70\x{} on the L4, tracking each other at every level in between. But
+the \emph{usability} of the hardware does not transfer at all: under the SLO
+fixed before measurement, the A100 complies at every concurrency and the L4 at
+none.
+
+\begin{quote}
+\textbf{The relative recommendation transfers; the absolute viability does not.}
+\end{quote}
+
+For a practitioner that separates two questions usually asked together.
+\emph{How should I configure the server?} can be answered on whatever card is
+available. \emph{Can this card serve my workload?} cannot be answered anywhere
+but on the card itself.
+
+The cost comparison, intended to be the headline, turns out to be the weakest
+claim in the paper. At list prices the cheap card leads on tokens per dollar by
+6--20\%, but the break-even is close enough that a $\pm10\%$ price movement
+reverses it. It is reported with its break-even rather than as a ratio.
+
+\paragraph{Scope.} One model, one provider, two cards, one load pattern, one
+prompt-reuse regime, and a framework comparison that was attempted and abandoned
+for a documented toolchain reason. The transfer result rests on 80 records with
+run-to-run spread of at most 1.66\%. The cost result rests on prices I did not
+verify.
+
+% =====================================================================
+\section*{Artefacts}
+\begin{itemize}\itemsep1pt
+\item Result records: \hs{results/vllm\_\{a100,l4\}\_fp16\_*.jsonl} --- 80
+      records, all \hs{ok}
+\item Harness validation: \hs{results/harness\_validation.md}
+\item Analysis: \hs{scripts/analysis.py} --- produces every number in
+      Section~\ref{sec:results}
+\item Figures: \hs{scripts/plot\_results.py}
+\item Pre-registration: \hs{SCOPE.md}
+\item Full record of what happened, including what went wrong: \hs{LOG.md}
+\end{itemize}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

@@ -120,9 +120,9 @@ Well-resourced labs are active here. **Do not compete on kernel-level quantizati
 
 | Work | What it establishes |
 |---|---|
-| **APEX4** (Jun 2026) | Tensor-core-to-CUDA-core ratio is the primary hardware factor governing W4A4 efficiency. Same kernel gives 2.0–2.5× on RTX 3090 but 0.43–0.47× on A100 — viability is *platform-dependent*, not universally infeasible |
-| **AnyBCQ** | Relative quantization speedups preserved across A100 and H100 |
-| **QServe** | Algorithm/system co-design for quantized serving |
+| **APEX4** (arXiv:2606.08761, Guo et al., Jun 2026) — *verified 5 Aug 2026* | Tensor-core-to-CUDA-core ratio is the primary hardware factor governing W4A4 efficiency. Same kernel gives 2.0–2.5× on RTX 3090 but 0.43–0.47× on A100 — viability is *platform-dependent*, not universally infeasible |
+| **AnyBCQ** | ~~Relative quantization speedups preserved across A100 and H100~~ **CORRECTED 5 Aug 2026 — this claim is not made by the paper.** AnyBCQ (arXiv:2510.10467, Park et al., ICLR 2026) is a multi-precision extension of binary-coded quantization with direct bit-plane operations; it reports throughput gains up to 3.0x over half precision and 1.2x over prior multi-precision methods. The A100/H100 attribution was wrong and had propagated into a draft of Paper 3 before being caught |
+| **QServe** (arXiv:2405.04532, Lin et al., MLSys 2025) — *verified 5 Aug 2026* | W4A8KV4 quantization and system co-design; reports 2.4-3.5x higher throughput than TensorRT-LLM on A100 and L40S. Note the exact title is "W4A8KV4 Quantization and System Co-design", not "Algorithm and System Co-design" |
 
 APEX4 is, in effect, the kernel-level version of this entire thesis, published two months ago. That is good news — it establishes the direction is real — and a constraint: the kernel angle is taken.
 
@@ -550,7 +550,7 @@ Confirm exact identifiers and BibTeX from the primary sources. **Do not cite fro
 
 - Coactive, *Unlocking Video Insights: How an Optimized Video Ingestion Pipeline Transforms Content Discovery*. https://www.coactive.ai/blog/optimized-video-ingestion-pipeline — source of the 360p/30fps recommendation, the fixed-input-resolution justification, and the 224–1024 px range. This is Paper 2's practitioner-problem citation (§4.2); cite it as industry documentation, not as peer-reviewed work.
 - APEX4 (Jun 2026) — tensor-core-to-CUDA-core ratio, platform-dependent W4A4
-- AnyBCQ — speedup preservation across A100/H100
+- ~~AnyBCQ — speedup preservation across A100/H100~~ **VERIFIED 5 Aug 2026: claim was wrong, see §4.3.** Correct summary: multi-precision binary-coded quantization, arXiv:2510.10467, ICLR 2026
 - QServe — quantized serving co-design
 - TensorRT-LLM support matrix (primary documentation, for the SM75 constraint)
 - vLLM PagedAttention paper
