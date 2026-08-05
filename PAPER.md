@@ -240,12 +240,70 @@ scaling rather than absolute throughput in `results/harness_validation.md`.
 This does not show the real servers will behave identically — only that a
 flat or falling curve later cannot be explained away as a harness artifact.
 
+### 3.5 Engine build procedure
+
+TensorRT-LLM engines are compiled artifacts, architecture-specific, and the
+build itself is slow and uninformative when it fails (§6) — enough of an
+operational cost that this study records it as a result (§4's build-time
+table) rather than treating it as setup overhead a paper doesn't mention.
+
+**Two conversion paths are attempted, in order, and both outcomes are
+recorded regardless of which one works** (`scripts/build_trtllm_engine.py`):
+first, a direct build from the pinned Hugging Face checkpoint
+(`trtllm-build --checkpoint_dir <hf_dir>`, the flow newer TensorRT-LLM
+releases support for common architectures without a separate conversion
+step); if that fails, a per-model checkpoint-conversion script from
+TensorRT-LLM's own examples tree, then `trtllm-build` against the converted
+checkpoint. Which path this study's installed version actually needs is a
+Day 20 finding, not assumed in advance — the exact flags for both paths are
+provisional pending confirmation against the toolchain the Day 18 spike
+(`scripts/trtllm_spike.sh`) installs, and a wrong flag is expected to fail
+loudly with its exact error, which is itself recorded (§2.3).
+
+**Every build step is timed and resource-sampled independently**
+(`serving/build_log.py`): wall time, peak host RAM, and peak VRAM (sampled
+every second throughout the step, not read once at the end, since a build's
+memory high-water mark is usually mid-build, not at completion). Both
+successful and failed steps produce a record — a build that fails at
+checkpoint conversion still reports the wall time and memory it spent
+getting there, because that is part of the operational cost too.
+
+**Persistence and verification are not optional.** §5: "an engine lost to a
+disconnect is a day lost." On success, the engine directory is copied
+immediately to Google Drive, then the *copy* — not the original — is
+verified by comparing file counts and per-file byte sizes against the
+source (`persist_to_drive`). A full content hash was considered and
+rejected as disproportionate: engine files run into the gigabytes, and a
+size/count mismatch already catches the failure mode this guards against
+(a partial or interrupted Drive write), at a fraction of the I/O cost.
+
+**Parity, before any sweep.** Once both an engine (TensorRT-LLM) and a vLLM
+server are live behind their respective OpenAI-compatible endpoints,
+`scripts/check_parity.py` sends the same frozen prompt set to both, greedy,
+and requires an *exact* match — not the tolerance band the Day 22 precision
+-ladder quality gate allows (§4.4), because these are two servers both
+claiming to run the identical FP16 model. Any divergence means one of them
+is not serving what it claims to, and the design is to stop and fix before
+a single concurrency-sweep number is collected, rather than discover it
+after the fact.
+
 ---
 
 ## 4. Results
 
 [pending: block days 5–6 (labelled "Day 23–24" in the programme's original
-numbering)]
+numbering) for the headline figure and verdict]
+
+### 4.1 Engine build times
+
+Started today (block day 3, "Day 20"); filled in as builds complete. A row
+exists for every attempt, successful or not (§6, §2.3) — a blank cell here
+is not an option this table allows.
+
+| Card | Precision | Framework | Outcome | Wall time | Peak host RAM | Peak VRAM | Notes |
+|---|---|---|---|---|---|---|---|
+| A100-SXM4-40GB | fp16 | tensorrt-llm | [pending: Colab] | | | | |
+| L4-24GB | fp16 | tensorrt-llm | [pending: block day 4 / "Day 21"] | | | | fresh build, not a copy — engines are architecture-specific (§12) |
 
 ---
 

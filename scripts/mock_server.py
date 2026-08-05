@@ -47,6 +47,8 @@ from serving import config  # noqa: E402
 TTFT_DELAY_S = 0.05
 TOKEN_SLEEP_S = 0.01
 
+TOKEN_TEXT_KEY: web.AppKey[str] = web.AppKey("token_text", str)
+
 
 def theoretical_ceiling_tok_s(
     concurrency: int, output_tokens: int = config.OUTPUT_TOKENS
@@ -70,13 +72,14 @@ async def completions(request: web.Request) -> web.StreamResponse:
     # that many; the canned stream mirrors that rather than always using
     # max_tokens, so a caller that forgets min_tokens is caught here too.
     n_tokens = max(max_tokens, min_tokens)
+    token_text = request.app[TOKEN_TEXT_KEY]
 
     resp = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
     await resp.prepare(request)
 
     await asyncio.sleep(TTFT_DELAY_S)
     for i in range(n_tokens):
-        chunk = {"choices": [{"text": "x"}]}
+        chunk = {"choices": [{"text": token_text}]}
         await resp.write(f"data: {json.dumps(chunk)}\n\n".encode())
         if i < n_tokens - 1:
             await asyncio.sleep(TOKEN_SLEEP_S)
@@ -85,8 +88,14 @@ async def completions(request: web.Request) -> web.StreamResponse:
     return resp
 
 
-def create_app() -> web.Application:
+def create_app(token_text: str = "x") -> web.Application:
+    """`token_text` is the only thing distinguishing one mock server
+    instance from another -- used by `tests/test_check_parity.py` to stand
+    up two instances that disagree, so the parity check's failure path is
+    tested against a real (if fake) divergence, not just mocked out.
+    """
     app = web.Application()
+    app[TOKEN_TEXT_KEY] = token_text
     app.router.add_get("/health", health)
     app.router.add_post("/v1/completions", completions)
     return app
@@ -95,8 +104,9 @@ def create_app() -> web.Application:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--token-text", default="x")
     args = ap.parse_args()
-    web.run_app(create_app(), port=args.port)
+    web.run_app(create_app(token_text=args.token_text), port=args.port)
 
 
 if __name__ == "__main__":

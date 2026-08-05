@@ -281,3 +281,120 @@ against a real model still needs the rented GPU.
 found and fixed along the way (ProactorEventLoop sleep collapse; aiohttp's
 default 100-connection cap). The harness is ready; the first real curve is
 still queued for Colab, not faked or estimated here]`
+
+---
+
+## Day 3 — Wed 5 Aug 2026
+
+M03-SERVING.md calls this "Day 20": TensorRT-LLM engine, A100, budget the
+whole day. **Nothing in that day's Build-and-run list can execute on the
+CPU dev box at all** — engine building needs TensorRT-LLM, which (LOG.md
+Day 1) doesn't even install on Windows, let alone build without a CUDA
+device. Everything today is code written and structurally tested, queued
+for the Colab session, same honesty as Day 1's vLLM sanity number.
+
+**Refactor before writing the new framework.** `serve_vllm.py`'s
+health-check/warmup/sanity-check code and its `stream_completion` would
+otherwise have been copy-pasted into a new `serve_trtllm.py` — a third
+implementation of the §4.1 TTFT/TPOT formula (after `client.py`'s async
+version and `serve_vllm.py`'s sync one), which is exactly the kind of drift
+this project keeps flagging as a risk. Pulled the shared pieces into
+`serving/serve_common.py` first; `serve_vllm.py` now only owns its
+framework-specific `launch()` and `_DTYPE_FLAGS`.
+
+**A second real bug, this one in testing the refactor.** The first pass at
+`tests/test_serve_common.py` ran `mock_server.py` in-process
+(`aiohttp.test_utils.TestServer`) and called `serve_common.stream_completion`
+(a synchronous `requests` call) via `asyncio.to_thread` from inside the same
+event loop. Timing came back wrong in a new way: TTFT measured at **2.14s**
+against a server configured for ~0.05s. Isolated by timing a plain
+`requests` call with *no* event loop involved at all — 0.078s, correct —
+which pinned the cause on the interaction itself: `requests`, called via
+`to_thread`, contending with an active `WindowsSelectorEventLoopPolicy` loop
+in the same process. (This is a different failure mode from Day 2's
+Proactor-sleep-collapse bug, and a good reminder that "the fix from
+yesterday" doesn't mean "no more event-loop surprises today.") Fixed by
+switching the affected tests to a **real subprocess** `mock_server.py`
+instead of an in-process test server — simpler, and closer to how
+`serve_vllm.py`/`serve_trtllm.py` actually talk to a server in practice (a
+separate process, always). Re-ran: 7/7 passing, no stall, ~7s total instead
+of 17s.
+
+**`serving/build_log.py`** — engine-build timing/RAM/VRAM logging, generic
+over the command run. Peak host RAM (`psutil`, whole-system, since a build
+spawns its own subprocesses and per-process RSS would undercount) and peak
+VRAM (`nvidia-smi`, polled every second in a background thread; returns
+`None` cleanly on this GPU-less dev box, same spirit as
+`provenance.stamp()`'s "none (CPU)"). Records both successful and failed
+build steps, per §6's "record every failed attempt, not just the
+successful one." 7 tests, including one that confirms `_nvidia_smi_used_mb()`
+genuinely hits its except-and-return-`None` path on this machine rather
+than a mocked one.
+
+**`scripts/build_trtllm_engine.py`** — the Day 20 build script itself.
+Attempts a direct HF-checkpoint build first, falls back to a per-model
+convert-then-build flow on failure, and records *which* path worked (or
+both failures) via `build_log`. Persists to Drive and verifies the copy by
+file-count/byte-size comparison, not a full content hash — engine files run
+into the gigabytes, and size/count already catches a partial Drive write at
+a fraction of the I/O cost. The two conversion paths and their exact CLI
+flags are flagged provisional in the file's own docstring, same as
+`serve_vllm.py`'s `_DTYPE_FLAGS` — confirmed against the real installed
+version on Colab, not assumed here. `_engine_id` and `persist_to_drive` are
+unit-tested against `tmp_path` directories (5 tests); the build steps
+themselves need `trtllm-build` and are not — there is nothing to fake there
+that wouldn't just be lying about what was tested.
+
+**`scripts/serve_trtllm.py`** — the TensorRT-LLM twin of `serve_vllm.py`,
+now genuinely thin thanks to the refactor: only `launch()` (the
+`trtllm-serve` command) and the GPU-host guard are framework-specific.
+Defaults to port 8001 (vLLM stays on 8000) so both can run side by side —
+required for the parity check below.
+
+**`scripts/check_parity.py`** — same prompt set, greedy, exact match
+required (no tolerance band, unlike the Day 22 quality gate — these are two
+servers both claiming to run the identical FP16 model, so anything short of
+exact means one of them isn't). Reuses `serving/quality.exact_match_rate`
+rather than a second comparison implementation. Tested for real, not just
+structurally: `mock_server.py` got a `--token-text` flag so two instances
+can be started that deliberately disagree (`"x"` vs `"y"`), and
+`test_check_parity.py` confirms both the agree→PASS and diverge→FAIL paths
+against genuinely different server output, plus `main()`'s exit codes. One
+self-inflicted bug caught while writing these tests: an early version tried
+to monkeypatch `shutil.copytree` with a replacement that called
+`import shutil; shutil.copytree(...)` internally — since `shutil` is one
+shared module object, that replacement was calling *itself*, producing a
+`RecursionError`. Fixed by stubbing the copy out entirely and pre-seeding
+the destination directory instead of trying to wrap the real function.
+
+**Cleanup:** `mock_server.py`'s app-storage key switched from a plain string
+(`app["token_text"]`) to `web.AppKey`, clearing an aiohttp deprecation
+warning that showed up once `--token-text` was added and multiple app
+instances existed side by side in the same test run.
+
+**Build:** `serving/serve_common.py` · `serving/build_log.py` ·
+`scripts/serve_trtllm.py` · `scripts/build_trtllm_engine.py` ·
+`scripts/check_parity.py` · `scripts/serve_vllm.py` (refactored onto
+`serve_common`) · `scripts/mock_server.py` (`--token-text`, `AppKey` fix) ·
+17 new tests (`test_serve_common.py`, `test_build_log.py`,
+`test_build_trtllm_engine.py`, `test_check_parity.py`) — 74 total, all
+passing on CPU, no warnings.
+
+**Write:** `PAPER.md` §3.5 Engine build procedure (both conversion paths,
+the persistence/verification design, the parity-check rule), §4.1 the
+build-time table skeleton (columns fixed, rows pending Colab).
+
+**Queued for Colab (carried forward, plus today's additions):** the
+TensorRT-LLM 30-minute spike, the vLLM concurrency-1 sanity number, the
+first real vLLM/A100 curve (all since Day 1/2) — and now also the actual
+A100 TensorRT-LLM engine build, its Drive persistence and verification, and
+the vLLM/TensorRT-LLM parity check for real. All of today's scripts are
+written, reviewed, and tested against everything that doesn't require a
+GPU; none of them have touched a real engine build yet.
+
+`[outcome: serve_common refactor done (one TTFT/TPOT implementation, not
+three); build_log, build_trtllm_engine, serve_trtllm, and check_parity all
+written and tested against everything CPU-testable; one new event-loop bug
+found and fixed (requests+to_thread+Selector-loop contention) plus one
+self-inflicted test bug (shutil monkeypatch recursion); the actual A100
+engine build is still queued for Colab, not faked or estimated here]`
