@@ -218,17 +218,32 @@ exactly N at all times, which is what "concurrency N" means throughout. Open-loo
 (fixed arrival rate) is the other valid design but produces queue collapse above
 saturation, which would bury configuration differences in queueing delay.
 
-**Latency is measured client-side, on the stream:**
+**Latency is measured client-side, on the stream.** Three timestamps are taken
+per request, all in the client:
+
+| | |
+|---|---|
+| `t0` | the request is sent |
+| `t1` | the first streamed chunk arrives |
+| `t2` | the last streamed chunk arrives |
+
+From those, with `n` the number of output tokens in the response:
 
 ```
-request sent           → t0
-first streamed chunk   → t1     TTFT = t1 − t0
-last streamed chunk    → t2     TPOT = (t2 − t1) / (n_output_tokens − 1)
+TTFT = t1 - t0
+
+TPOT = (t2 - t1) / (n - 1)
 ```
 
-The `− 1` matters: the first token is already charged to TTFT, and counting it
-twice flatters every configuration equally — the kind of error that survives
-review because it cancels.
+TTFT is the wait before any text appears. TPOT is the mean interval between
+consecutive output tokens thereafter.
+
+**The denominator is `n - 1`, not `n`.** The first token's arrival is already
+charged to TTFT; only the remaining `n - 1` tokens arrive during the interval
+`t2 - t1`, so there are `n - 1` gaps to average over. Dividing by `n` instead
+would understate TPOT — and it would understate it equally for every
+configuration, which is the kind of error that survives review because it
+cancels out of every ratio in §4.
 
 **Warmup.** 32 discarded requests at the target concurrency — not at concurrency
 1 — before a fixed 60-second measurement window. First requests trigger CUDA
@@ -243,7 +258,7 @@ concurrency across the whole range (ratio to linear 0.93–1.06, no downward tre
 at the top of the axis) and client CPU never exceeded 51% mean. Under real load
 client CPU peaked at 22.8%. Full result in `results/harness_validation.md`.
 
-**One record per repeat**, aggregated at read time, so run-to-run spread stays
+**One record per repeat.** Records are aggregated at read time, so run-to-run spread stays
 recoverable. Every record carries GPU, driver, CUDA version, torch version, git
 SHA, model revision and `prompts_sha`.
 
