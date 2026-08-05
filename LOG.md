@@ -737,3 +737,112 @@ conflict):** the timeboxed TensorRT-LLM install spike. **Find TensorRT-LLM's
 prefix-reuse setting during the spike and confirm it can be disabled** — an
 engine built and swept before that is checked would produce a curve that is
 not comparable to today's, and the mistake would only surface at analysis.
+
+---
+
+## Day 7 — Wed 5 Aug 2026 — **TensorRT-LLM refused. Fallback executed.**
+
+The §6 spike was written to answer one question inside 30 minutes — *does this
+toolchain function on this runtime at all* — so that the answer would be cheap
+whichever way it went. It went the expensive way, and it was cheap.
+
+### What happened, in order
+
+```
++0s     nvidia-smi              A100-SXM4-40GB, driver 580.82.07, CUDA 13.0
++266s   pip install             SUCCEEDED -- tensorrt-llm 1.2.1,
+                                tensorrt 10.14.1.48, torch DOWNGRADED to 2.9.1
++266s   import tensorrt_llm     FAILED
+```
+
+```
+File "tensorrt_llm/_utils.py", line 47, in <module>
+    from tensorrt_llm.bindings import DataType, GptJsonConfig, LayerType
+ImportError: libcublasLt.so.13: cannot open shared object file: No such file or directory
+```
+
+**The install is not the problem — the package installs cleanly.** TensorRT-LLM
+1.2.1 ships CUDA 13 binaries and its native bindings link against
+`libcublasLt.so.13`. That library is not present on the runtime, and it is not
+obtainable:
+
+| Attempt | Result |
+|---|---|
+| Register every `nvidia/*/lib` directory with `ldconfig` | Library genuinely absent — not a path problem |
+| `pip install nvidia-cublas-cu13` (PyPI) | `Failed building wheel` — PyPI entry is a source stub with no binary |
+| `pip install --extra-index-url https://pypi.nvidia.com/ nvidia-cublas-cu13` | Identical failure from NVIDIA's own index |
+
+Three attempts, all inside the 30-minute box. Total elapsed well under budget.
+
+### Why this is a result and not just a bad day
+
+**The same failure mode hit both frameworks.** vLLM 0.26.0 failed on Day 5 with
+`libcudart.so.13`; TensorRT-LLM 1.2.1 failed today with `libcublasLt.so.13`.
+Two independent frameworks, both shipping CUDA 13 binaries onto a host whose
+Python CUDA stack is CUDA 12.8, both failing at the dynamic loader before
+executing a single token.
+
+The difference is decisive and worth stating precisely: **vLLM's failure was a
+path problem and was fixed in one line** (`ldconfig` against a library that was
+already on disk). **TensorRT-LLM's is a missing-artifact problem with no
+supported route to the artifact** — the CUDA 13 cuBLAS it requires is not
+published as a wheel on either index it directs users to.
+
+**Second finding, from the install log:** TensorRT-LLM 1.2.1 pins **torch
+2.9.1**; vLLM 0.26.0 requires **torch 2.11.0**. The two frameworks cannot share
+an environment, and now that is a recorded version conflict rather than an
+assumption. The two-runtime protocol adopted on Day 5 was correct for a reason
+we can now cite.
+
+These belong in §5 Threats and in §4 as a reported outcome:
+
+> Framework installation is CUDA-version-coupled, and on a rented host whose
+> CUDA stack is not under the user's control this is a hard constraint rather
+> than a configuration detail. Both frameworks evaluated shipped CUDA 13
+> binaries onto a CUDA 12.8 host. vLLM's dependency was present but unregistered
+> with the dynamic loader and was recoverable; TensorRT-LLM's was absent and had
+> no installable source. Published framework comparisons report neither.
+
+### Hard stop applied
+
+`SCOPE.md`'s four-way rule, written on Day 1 before it was inconvenient:
+**neither engine serving → the TensorRT-LLM axis is dropped entirely and the
+Day 18 contingency executes.** Applied today. No engine build was attempted on
+either card, so no build-time data exists and none is claimed.
+
+Note that `scripts/check_hard_stop.py` was written for a *build* log and this
+failure occurred before any build was attempted. It correctly treats a card
+never attempted as equivalent to a failure, so the verdict is the same, but the
+decision here was made from the spike log rather than the build log.
+
+### The fallback, and why it is stronger than §17 anticipated
+
+§17 named the substitute axis in advance: **vLLM configuration** — KV-cache
+fraction, max-num-seqs, chunked prefill. The thesis question is untouched by the
+swap, because the question was never *which framework wins*. It is **whether the
+optimal configuration depends on the card**.
+
+What §17 could not have known is that Day 6 already produced the best knob in
+that set. The prefix-caching contrast measured on the A100 — **1.01× at
+concurrency 1 rising monotonically to 2.56× at 128** — is a configuration knob
+whose value grows with load, measured cleanly, with two complete curves already
+in hand. It is a far better lead knob than KV-cache fraction.
+
+So the fallback design is not a consolation. It is:
+
+- **Knob 1: prefix caching on/off** — A100 both curves already measured
+- **Knob 2: chunked prefill on/off**
+- **Knob 3: max-num-seqs**
+- swept across **concurrency 1–128** on **A100 and L4**
+
+`SCOPE.md` rewritten today accordingly, with Hypothesis 3 restated. Two of the
+required curves exist; the L4 pass is what remains.
+
+`[outcome: refuted at the toolchain level -- TensorRT-LLM 1.2.1 installs but
+cannot load its bindings on this runtime, and the missing CUDA 13 cuBLAS is not
+obtainable from either published index. Framework axis dropped per the
+pre-registered hard-stop rule. Configuration axis substituted; SCOPE.md
+rewritten before any further measurement]`
+
+**Next session:** L4 runtime, vLLM, prefix caching off then on — the two curves
+that complete the card comparison.

@@ -1,111 +1,134 @@
 # SCOPE — Measurement 03: Serving
 
-**Committed 5 Aug 2026 (Day 1 of this block — M03-SERVING.md's own calendar
-labels this "Day 18"; that numbering is the programme's original 28-day
-schedule and is kept in section headers there for cross-reference, but the
-block actually starts today, immediately after Measurement 02's halt.
-`Ingestion/LOG.md` → *Day 3 — Measurement 02 halted* names Serving as next,
-explicitly because its ground truth is machine-generated and the annotation
-failure that stopped M02 cannot recur here.**
+**Rewritten 5 Aug 2026, after the TensorRT-LLM spike refused and before any
+further measurement.** The original scope compared two serving *frameworks*.
+TensorRT-LLM 1.2.1 installs on the target runtime but cannot load its own
+bindings — it requires `libcublasLt.so.13`, which is absent and is not
+obtainable from PyPI or from NVIDIA's own index (`LOG.md`, Day 7). The
+pre-registered hard-stop rule below fired, and §17's named contingency is now
+the study.
+
+*This is the second scope change in the programme, and like Measurement 02's it
+is recorded rather than quietly absorbed. The difference is that this one is
+forced by a toolchain refusal that is itself a reportable result, and the
+thesis question survives the swap intact.*
+
+---
 
 ## In scope
 
-One serving harness driving vLLM and TensorRT-LLM behind identical
-OpenAI-compatible endpoints, serving one pinned model
-(`Qwen/Qwen2.5-7B-Instruct`, revision `a09a3545…`, `configs/model_pins.yaml`),
-swept over framework × card × concurrency (8 log-spaced levels, 1–128) at
-FP16 — the main sweep, 96 measured runs — plus a precision ladder (FP8/INT8/
-INT4 where the architecture permits) at three concurrency levels (1, 16,
-128) on both an **A100-SXM4-40GB** and an **L4-24GB**. Ground truth is
-machine-generated: TTFT, TPOT and throughput are read off a clock, and each
-precision's output is gated against the FP16 reference on the *same card and
-framework* before its throughput is allowed into the figure (§4.4). Output:
-four cost-normalised throughput curves (tokens/sec per GPU-dollar-hour vs.
-concurrency) and the crossover concurrency per card, with an interval.
+One serving harness driving **vLLM** behind an OpenAI-compatible endpoint,
+serving one pinned model (`Qwen/Qwen2.5-7B-Instruct`, revision `a09a3545…`,
+`configs/model_pins.yaml`) at FP16, swept over **configuration × card ×
+concurrency**:
+
+| Axis | Levels |
+|---|---|
+| **Prefix caching** | on / off |
+| **Chunked prefill** | on / off |
+| **max-num-seqs** | scheduler batch cap, two levels |
+| **Card** | A100-SXM4-40GB · L4-24GB |
+| **Concurrency** | 1 · 2 · 4 · 8 · 16 · 32 · 64 · 128 |
+
+Ground truth is machine-generated: TTFT, TPOT and throughput read off a clock,
+client-side, closed-loop (§4.1, §4.2). Output: cost-normalised throughput and
+goodput against concurrency, per configuration, per card — and **the
+concurrency at which the configuration ranking changes, on each card.**
+
+**Already measured** (A100, prefix caching on and off, 8 concurrency levels ×
+3 repeats each, `results/`): two complete curves. The L4 pass is what remains.
 
 ## Out of scope
 
-Kernel-level quantization research — that is APEX4/AnyBCQ territory
-(`REFERENCE.md` §4.3) and this study is deliberately not competing there, it
-is measuring framework-level behaviour under load. Any hardware beyond the
-A100/L4 pair (the T4 is SM75 and TensorRT-LLM's INT8/INT4/fused-attention
-paths reject it, `REFERENCE.md` §3). Open-loop (fixed arrival-rate) load
-patterns — closed-loop only (§4.2). Any input/output token length other than
-the frozen 512/128 pair (`serving/config.py`). Multi-adapter or LoRA serving.
-Generation quality as anything other than a pass/fail gate per precision —
-it is a guard here, not an axis (§2.2).
+**TensorRT-LLM**, and framework comparison generally — dropped by the
+hard-stop rule, with the refusal reported as a result rather than a gap
+(`LOG.md` Day 7, §4). Kernel-level quantization research — APEX4/AnyBCQ
+territory (`REFERENCE.md` §4.3), deliberately not competed with. Any hardware
+beyond the A100/L4 pair. Open-loop load patterns — closed-loop only. Any
+input/output token length other than the frozen 512/128 pair
+(`serving/config.py`). Multi-adapter or LoRA serving. Generation quality as
+anything other than a pass/fail gate. **Engine build time and precision
+refusals**, which were TensorRT-LLM-specific and no longer apply.
 
-## Hypothesis 3 — committed before any sweep
+The **precision ladder** (FP8/INT8/INT4) is retained as optional and remains
+the first thing to cut. FP16 across the configuration axis is the study.
 
-> vLLM leads at low concurrency; TensorRT-LLM leads above a crossover point;
-> and **the crossover moves with GPU tier**, arriving at a different
-> concurrency on the L4 than on the A100, because compiled engine-level
-> optimisation and memory-efficient batching are rewarded differently by a
-> card with less bandwidth and less headroom.
+## Hypothesis 3 — restated 5 Aug 2026, before any L4 measurement
 
-**Direction fixed today: vLLM-low / TensorRT-LLM-high** — the option
-`M03-SERVING.md` §1.1 lists first and `REFERENCE.md` §7 already commits to.
-Reasoning: at concurrency 1 there is nothing to batch and decode is
-bandwidth-bound, so neither framework can compile its way past the memory
-wall — they should be close. TensorRT-LLM's fused kernels and in-flight
-batching are load-time optimisations, and they show up under load, not at
-concurrency 1. The alternative (TRT-low / vLLM-high, on the theory that
-compiled kernels shorten every request regardless of load while
-PagedAttention's memory-packing advantage only pays off under concurrency)
-was equally arguable a priori and is **not** being pre-registered — per
-§1.1, only one direction can be committed, and it is not revised after
-seeing data. If the measurement contradicts this direction, that is a result
-and gets reported as one.
+> The optimal vLLM configuration is **concurrency-dependent** — no single
+> configuration leads across the whole load range — and **the concurrency at
+> which the ranking changes depends on the card**, arriving at a different
+> point on the L4 than on the A100 because a card with less memory bandwidth
+> and less KV capacity is rewarded differently by the same setting.
 
-**Refuted if.** One framework leads at every concurrency level on **both**
-cards, **or** the crossover sits at the same concurrency on both.
+**Direction retained from the original pre-registration**, with the same
+reasoning transposed: settings whose benefit is memory-efficiency-shaped
+(prefix caching, scheduler batching) should be worth little at concurrency 1,
+where there is nothing to batch and decode is bandwidth-bound, and worth
+increasingly more under load. This is now partly *observed* rather than
+predicted — the A100 prefix-caching contrast rises monotonically from 1.01× at
+concurrency 1 to 2.56× at 128 (`LOG.md` Day 6). **The untested half is whether
+that curve has the same shape on the L4, and that is the live prediction.**
 
-**Partial if.** A crossover exists and moves, but the movement is within
-run-to-run variance (3 repeats), or it moves for a mechanism other than the
-predicted one — e.g. an OOM cliff rather than a gradual trade. Report which,
-and say plainly the mechanism is not the one predicted.
+**Refuted if.** One configuration leads at every concurrency level on **both**
+cards, **or** the ranking changes at the same concurrency on both.
 
-**Never cut.** Both cards, and the concurrency axis. A single-card sweep is
-a vendor blog post; a single-concurrency comparison is what the literature
-already has. Cut the precision ladder first (§1's table), then the upper
-concurrency rungs.
+**Partial if.** The ranking changes and the change point moves, but the
+movement is inside run-to-run variance (3 repeats; observed spread ≤0.38% on
+the A100), or it moves for a mechanism other than the predicted one — an OOM
+cliff rather than a gradual trade. Report which, and say plainly the mechanism
+is not the one predicted.
 
-## The Day 21 engine hard stop
+**Never cut.** Both cards, and the concurrency axis. A single-card
+configuration sweep is a tuning guide, not a hardware-dependence result. Cut
+`max-num-seqs` first, then chunked prefill. **Prefix caching on/off is the
+lead knob and is not cut** — it is the one already shown to have a
+concurrency-dependent payoff.
 
-By end of the block's Day 4 (labelled "Day 21" in `M03-SERVING.md`'s
-programme-relative numbering), each card's TensorRT-LLM engine is either
-serving or it isn't, and the two outcomes are handled differently — this is
-fixed today, before it is inconvenient:
+## What the hard stop was, and that it fired
 
-- **Both serving.** Proceed with the full TensorRT-LLM axis on both cards.
-- **A100 serving, L4 not.** `M03-SERVING.md` §17's named fallback: report
-  the A100 crossover; report the L4 build failure with its exact error as a
-  **portability result**, not a gap; add a vLLM-only L4 concurrency curve so
-  the card axis still has data.
-- **L4 serving, A100 not.** Not a case §17 names directly (it assumes the
-  A100 build succeeds first, per the Day 20 → Day 21 ordering), but the same
-  logic applies symmetrically: report the L4 crossover, the A100 failure
-  with its exact error, and a vLLM-only A100 curve.
-- **Neither serving.** The TensorRT-LLM axis is dropped **entirely**, and
-  the Day 18 contingency executes instead (`M03-SERVING.md` §17,
-  "TensorRT-LLM will not install on the runtime"): the framework axis
-  becomes vLLM configuration knobs (KV-cache fraction, max-num-seqs,
-  chunked prefill on/off) — still a concurrency sweep, still two cards,
-  still a crossover question. This file gets rewritten then, not later.
+Written Day 1, applied Day 7 without modification:
 
-`scripts/check_hard_stop.py` reads the build log and applies exactly this
-rule mechanically, so the call made in the moment is "run the script and
-read its verdict," not a judgment call made under the pressure of a
-disconnected Colab session.
+> **Neither engine serving.** The TensorRT-LLM axis is dropped **entirely**,
+> and the Day 18 contingency executes instead (`M03-SERVING.md` §17,
+> "TensorRT-LLM will not install on the runtime"): the framework axis becomes
+> vLLM configuration knobs. This file gets rewritten then, not later.
+
+No engine build was attempted on either card, because the failure occurred at
+import, before any build. **No build-time data exists and none is claimed** —
+the §4 build-time table is removed rather than left with empty rows.
+
+## Held fixed, and reported as configuration
+
+Unchanged from the original scope except where the framework axis touched them:
+
+| Held | Value |
+|---|---|
+| Model | `Qwen/Qwen2.5-7B-Instruct`, revision `a09a3545…`, pinned via `pins.py` |
+| Precision | FP16 (`--dtype float16`; the model is natively bf16 and is cast) |
+| Input / output tokens | 512 / 128, frozen, `prompts_sha 3b3efb02` |
+| Max model length | 2048 |
+| Sampling | Greedy, `temperature=0` |
+| Request pattern | Closed-loop, N workers, one in flight each |
+| Warmup | 32 requests at the target concurrency, discarded |
+| Repeats | 3, one record written per repeat |
+
+**Prefix caching moves from held-fixed control to swept knob.** It was fixed
+off on Day 6 precisely to make the vLLM/TensorRT-LLM comparison valid; with
+that comparison gone, the setting becomes the study's most informative axis.
 
 ## What this is, and is not
 
-This is a **framework-and-hardware** study: does the vLLM/TensorRT-LLM
-ranking invert with load, and does where it inverts depend on the card. It
-is not a quantization-accuracy study (quality is a gate, §2.2) and not a
-kernel-level efficiency study (§4.3's gap sentence is about the framework
-layer, not the kernel layer). Engine build time and precision refusals are
-recorded as first-class results, not overhead or noise — §6, §2.3.
+This is a **configuration-and-hardware** study: does the best vLLM setting
+depend on how loaded the server is, and does the answer depend on the card. It
+is not a framework comparison — that was attempted and is reported as refused
+at the toolchain level, with the error strings verbatim. It is not a
+quantization-accuracy study, and not a kernel-level efficiency study.
 
-*Verbatim from `M03-SERVING.md` §1 and `REFERENCE.md` §7. Where this file
-and those disagree on scope, this file wins as of 5 Aug 2026.*
+The programme-level claim is unchanged by any of this. It was never *which
+framework wins*; it is **that the answer depends on the hardware**, and the
+configuration axis tests exactly that with two cards and a concurrency sweep.
+
+*Supersedes the 5 Aug (morning) version of this file. Where this file and
+`M03-SERVING.md` or `REFERENCE.md` §7 disagree, this file wins as of 5 Aug
+2026. `LOG.md` Day 7 records why.*
