@@ -60,7 +60,9 @@ def _engine_id(card: str, precision: str) -> str:
     return f"{config.STUDY_MODEL.replace('/', '_')}-{card}-{precision}"
 
 
-def try_direct_build(checkpoint_dir: str, output_dir: str, precision: str) -> dict:
+def try_direct_build(
+    checkpoint_dir: str, output_dir: str, precision: str, build_workers: int | None
+) -> dict:
     cmd = [
         "trtllm-build",
         "--checkpoint_dir",
@@ -76,12 +78,19 @@ def try_direct_build(checkpoint_dir: str, output_dir: str, precision: str) -> di
         "--max_seq_len",
         str(config.MAX_MODEL_LEN),
     ]
+    if build_workers is not None:
+        cmd += ["--workers", str(build_workers)]
     print(f"[{_LABEL}] attempt 1 (direct HF checkpoint):", " ".join(cmd))
     return build_log.run_timed_with_peaks(cmd)
 
 
 def try_convert_then_build(
-    hf_dir: str, revision: str, converted_dir: str, output_dir: str, precision: str
+    hf_dir: str,
+    revision: str,
+    converted_dir: str,
+    output_dir: str,
+    precision: str,
+    build_workers: int | None,
 ) -> list[dict]:
     steps = []
 
@@ -117,6 +126,8 @@ def try_convert_then_build(
         "--max_batch_size",
         str(max(config.CONCURRENCY_LEVELS)),
     ]
+    if build_workers is not None:
+        build_cmd += ["--workers", str(build_workers)]
     print(f"[{_LABEL}] attempt 2, step 2 (trtllm-build):", " ".join(build_cmd))
     steps.append(build_log.run_timed_with_peaks(build_cmd))
     return steps
@@ -148,6 +159,20 @@ def persist_to_drive(engine_dir: Path, drive_dir: Path) -> bool:
     return True
 
 
+def _default_build_workers(card: str) -> int | None:
+    """`trtllm-build --workers N` trades build parallelism for peak host
+    RAM: more workers build faster but hold more of the model in memory at
+    once. §12 flags the L4 as "tighter on memory ... less host RAM on most
+    runtimes" -- default to a conservative single worker there rather than
+    finding that out from an OOM'd build. Left unset (None -> trtllm-build's
+    own default) elsewhere, since the A100's host RAM headroom is not the
+    constraint on that card (§18's arithmetic was about the *inference*
+    KV-cache budget, not this build-time one, which is why this is a
+    separate, card-keyed default rather than reusing that number).
+    """
+    return 1 if card == "L4-24GB" else None
+
+
 def main() -> None:
     serve_common.require_gpu_host(_LABEL)
 
@@ -155,14 +180,21 @@ def main() -> None:
     ap.add_argument("--card", required=True, choices=config.CARDS)
     ap.add_argument("--precision", default="fp16", choices=config.PRECISIONS)
     ap.add_argument("--hf-checkpoint-dir", default=None, help="local HF snapshot; downloaded via huggingface_hub if omitted")
-    ap.add_argument("--output-dir", default="/tmp/trtllm-engine")
+    ap.add_argument("--output-dir", default=None, help="defaults to /tmp/trtllm-engine-<card>, so building both cards in one session can't clobber the other's in-progress output")
+    ap.add_argument("--build-workers", type=int, default=None, help="defaults to a card-aware value (1 on L4, trtllm-build's own default on A100) -- see _default_build_workers")
     ap.add_argument("--drive-dir", required=True)
     ap.add_argument("--log-out", default="results/trtllm_build_log.jsonl")
     args = ap.parse_args()
 
+    output_dir = args.output_dir or f"/tmp/trtllm-engine-{args.card}"
+    build_workers = args.build_workers if args.build_workers is not None else _default_build_workers(args.card)
+
     revision = pins.revision_for(config.STUDY_MODEL)
     engine_id = _engine_id(args.card, args.precision)
-    print(f"[{_LABEL}] card={args.card} precision={args.precision} revision={revision} engine_id={engine_id}")
+    print(
+        f"[{_LABEL}] card={args.card} precision={args.precision} revision={revision} "
+        f"engine_id={engine_id} build_workers={build_workers}"
+    )
 
     hf_dir = args.hf_checkpoint_dir
     if hf_dir is None:
@@ -170,7 +202,7 @@ def main() -> None:
 
         hf_dir = snapshot_download(config.STUDY_MODEL, revision=revision)
 
-    step1 = try_direct_build(hf_dir, args.output_dir, args.precision)
+    step1 = try_direct_build(hf_dir, output_dir, args.precision, build_workers)
     steps = [step1]
     succeeded = step1["returncode"] == 0
 
@@ -179,13 +211,13 @@ def main() -> None:
         print(step1["stderr"])
         print(f"[{_LABEL}] falling back to convert-then-build")
         steps += try_convert_then_build(
-            hf_dir, revision, "/tmp/trtllm-checkpoint", args.output_dir, args.precision
+            hf_dir, revision, "/tmp/trtllm-checkpoint", output_dir, args.precision, build_workers
         )
         succeeded = steps[-1]["returncode"] == 0
 
     if succeeded:
         drive_dir = Path(args.drive_dir) / engine_id
-        verified = persist_to_drive(Path(args.output_dir), drive_dir)
+        verified = persist_to_drive(Path(output_dir), drive_dir)
         succeeded = verified
 
     record = build_log.build_record(

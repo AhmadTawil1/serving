@@ -287,6 +287,28 @@ is not serving what it claims to, and the design is to stop and fix before
 a single concurrency-sweep number is collected, rather than discover it
 after the fact.
 
+**An engine does not port across cards, and that is itself a finding.** A
+TensorRT-LLM engine is compiled against a specific SM (streaming
+multiprocessor) architecture — the A100 is Ampere (SM80), the L4 is Ada
+(SM89) — so the L4 engine is a fresh build, never a copy of the A100's, and
+an A100 engine placed on an L4 simply will not load. A deployment artifact
+that cannot move between hardware tiers without being rebuilt from scratch
+is exactly the hardware-dependence this study's thesis is about, stated in
+the plainest possible terms: not "the optimal *configuration* differs by
+card," but "the optimal *binary* does not exist on the other card at all."
+vLLM has no equivalent constraint — the same process runs unmodified on
+either card — which is itself a fact worth a sentence in §4, not just a
+method footnote, since it is a real operational difference between the two
+frameworks that has nothing to do with throughput.
+
+**The build outcome on each card is evaluated against a pre-committed rule,
+not a judgment call made live.** `SCOPE.md` → "The Day 21 engine hard stop"
+fixes, in advance, what happens under each of the four (A100, L4) outcome
+combinations — both engines serving, only one, or neither — and
+`scripts/check_hard_stop.py` applies that rule mechanically against the
+build log rather than leaving the call to be made under the time pressure
+of a disconnecting Colab session.
+
 ---
 
 ## 4. Results
@@ -296,14 +318,17 @@ numbering) for the headline figure and verdict]
 
 ### 4.1 Engine build times
 
-Started today (block day 3, "Day 20"); filled in as builds complete. A row
-exists for every attempt, successful or not (§6, §2.3) — a blank cell here
-is not an option this table allows.
+Started block day 3 ("Day 20"); filled in as builds complete. A row exists
+for every attempt, successful or not (§6, §2.3) — a blank cell here is not
+an option this table allows.
 
 | Card | Precision | Framework | Outcome | Wall time | Peak host RAM | Peak VRAM | Notes |
 |---|---|---|---|---|---|---|---|
 | A100-SXM4-40GB | fp16 | tensorrt-llm | [pending: Colab] | | | | |
-| L4-24GB | fp16 | tensorrt-llm | [pending: block day 4 / "Day 21"] | | | | fresh build, not a copy — engines are architecture-specific (§12) |
+| L4-24GB | fp16 | tensorrt-llm | [pending: block day 4 / "Day 21"] | | | | Fresh build, not a copy — engines are architecture-specific (SM80 vs SM89, above). `--workers 1` used by default on this card (`build_trtllm_engine._default_build_workers`) to trade build parallelism for lower peak host RAM, since Colab's L4 runtime typically has less host RAM available than its A100 runtime. |
+
+**Hard-stop verdict:** [pending — `scripts/check_hard_stop.py`'s output,
+once both rows above exist]
 
 ---
 
@@ -323,6 +348,16 @@ is not an option this table allows.
   cost of not characterising sampling-mode latency.
 - Colab-tier hardware sharing and Colab-provisioned SKUs (§3 of
   `REFERENCE.md` — the A100 is the 40GB SXM4 SKU, not the 80GB variant).
+- **Engine build times are runtime-dependent, and were measured on Colab
+  Pro, not bare metal.** A build competing with Colab's own host-side
+  virtualisation and shared storage I/O (the Drive copy in particular) is
+  not the same measurement as the identical build on a dedicated bare-metal
+  box, and the wall-time and peak-RAM figures in §4.1 should be read as "how
+  long this took on this rented, shared runtime," not as a portable
+  benchmark of TensorRT-LLM's build cost in general. The `--workers`
+  setting used per card (§4.1) is itself a build-time/peak-RAM tradeoff
+  chosen for *this* runtime's constraints and may not be the setting a
+  different host would want.
 
 ---
 

@@ -26,6 +26,35 @@ def test_engine_id_is_filesystem_safe_no_slashes():
     assert "/" not in engine_id  # the model id has a "/" -- must not leak into a path segment
 
 
+def test_default_build_workers_is_conservative_on_l4():
+    assert bte._default_build_workers("L4-24GB") == 1
+
+
+def test_default_build_workers_is_unset_on_a100():
+    # None -> trtllm-build's own default; the A100's host RAM headroom isn't
+    # the constraint that L4-24GB is (§12), so no override is forced here.
+    assert bte._default_build_workers("A100-SXM4-40GB") is None
+
+
+def test_try_direct_build_passes_workers_flag_when_set(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(bte.build_log, "run_timed_with_peaks", lambda cmd: captured.setdefault("cmd", cmd) or {"returncode": 0})
+
+    bte.try_direct_build("hf-dir", "out-dir", "fp16", build_workers=1)
+
+    assert "--workers" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--workers") + 1] == "1"
+
+
+def test_try_direct_build_omits_workers_flag_when_unset(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(bte.build_log, "run_timed_with_peaks", lambda cmd: captured.setdefault("cmd", cmd) or {"returncode": 0})
+
+    bte.try_direct_build("hf-dir", "out-dir", "fp16", build_workers=None)
+
+    assert "--workers" not in captured["cmd"]
+
+
 def _make_fake_engine(dir_: Path) -> None:
     dir_.mkdir(parents=True, exist_ok=True)
     (dir_ / "config.json").write_text('{"ok": true}')

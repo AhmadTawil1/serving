@@ -398,3 +398,87 @@ written and tested against everything CPU-testable; one new event-loop bug
 found and fixed (requests+to_thread+Selector-loop contention) plus one
 self-inflicted test bug (shutil monkeypatch recursion); the actual A100
 engine build is still queued for Colab, not faked or estimated here]`
+
+---
+
+## Day 4 — Wed 5 Aug 2026
+
+M03-SERVING.md calls this "Day 21": TensorRT-LLM engine, L4, fresh build,
+and the §6 hard stop. Everything this day's Build-and-run list asks for —
+an L4 engine build, both TensorRT-LLM curves if time allows, a vLLM/L4
+curve regardless — needs a live GPU, so nothing in that list ran today.
+What today produced instead: the L4-specific hardening the build script
+needed anyway, and a mechanical version of the hard-stop decision itself,
+so that when Colab does produce real build results, applying §6's rule
+is "run a script and read its output," not a judgment call made while a
+runtime is timing out.
+
+**`build_trtllm_engine.py` hardened for the L4 case §21 specifically flags
+as riskier.** Two changes:
+
+1. **Card-aware output directory** (`--output-dir` now defaults to
+   `/tmp/trtllm-engine-<card>` instead of a single hardcoded path) — building
+   A100 then L4 back-to-back in one Colab session could otherwise have the
+   second build's in-progress output silently land in the first's directory.
+2. **`--build-workers`, defaulting to 1 on the L4 and unset (framework
+   default) on the A100** (`_default_build_workers`). `trtllm-build
+   --workers N` trades build parallelism for peak host RAM; §21 says the L4
+   runtime "has 24 GB and less host RAM on most runtimes" than the A100
+   one, so defaulting to a single worker there is a deliberate bet against
+   an OOM'd build rather than discovering the tradeoff exists mid-build.
+   Worth being explicit that this is a *build-time* host-RAM concern,
+   unrelated to the *inference-time* KV-cache arithmetic already documented
+   in `serving/config.py` (§18) — two different memory budgets, two
+   different numbers, and conflating them would have been a real mistake to
+   make quietly. 4 new tests confirm the card-aware default and that the
+   `--workers` flag is threaded into the `trtllm-build` command only when
+   set.
+
+**`scripts/check_hard_stop.py`** — reads the build-log JSONL, takes the
+latest FP16 record per card, and prints the exact verdict for one of four
+outcomes (both engines serving / A100 only / L4 only / neither). While
+writing this, noticed `SCOPE.md`'s original "Day 21 engine hard stop"
+paragraph (written Day 1) was actually self-contradictory on close reading
+— it said the *trigger* was "both engines not serving," but then described
+reporting "the A100 crossover if that engine landed," which can't be true
+under a trigger that requires both to have failed. **Rewrote that paragraph
+today** into the explicit four-way rule the script now implements
+verbatim, rather than leaving the ambiguity for whoever reads `SCOPE.md`
+next under time pressure to resolve on the spot. This is exactly the kind
+of small policy bug that's cheap to catch here, writing calmly on a CPU box
+with no clock running, and expensive to catch live against a ticking Colab
+session — which is the whole reason this script exists rather than trusting
+the decision to memory. 10 tests, including one confirming a card that was
+never attempted at all (not just "attempted and failed") is treated
+identically to a failure rather than crashing on a missing key.
+
+**Write:** `PAPER.md` §3.5 gained the portability-note paragraph (an
+engine's SM-architecture binding is a sharper, more literal statement of
+the hardware-dependence thesis than a configuration difference — "the
+optimal binary does not exist on the other card at all") and a pointer from
+Method to the hard-stop rule now living in both `SCOPE.md` and
+`check_hard_stop.py`. §4.1's build-time table got its L4 row (still
+pending data) with the `--workers 1` choice noted, plus a "Hard-stop
+verdict" line to fill in once both rows exist. §5 Threats gained the
+engine-build entry: build times and the `--workers` choice are
+Colab-Pro-specific, not a portable benchmark of TensorRT-LLM's build cost
+on other hardware.
+
+**Build:** `scripts/build_trtllm_engine.py` (card-aware output dir,
+`--build-workers`) · `scripts/check_hard_stop.py` · `SCOPE.md` (hard-stop
+paragraph rewritten) · 14 new tests across `test_build_trtllm_engine.py`
+and the new `test_check_hard_stop.py` — 88 total, all passing on CPU.
+
+**Still queued for Colab (unchanged core items, carried forward):** the
+TensorRT-LLM spike, vLLM concurrency-1 number, first real vLLM/A100 curve,
+the actual A100 engine build + Drive verification, the real parity check —
+and now the L4 engine build itself, run through `check_hard_stop.py` once
+both cards' attempts exist. The hard-stop decision is data-dependent by
+design and stays undetermined here; today's work is what makes that call
+mechanical rather than improvised whenever it is actually made.
+
+`[outcome: no GPU-dependent Day 21 deliverable executed (none can be, on
+this box); build_trtllm_engine.py hardened for L4's tighter host RAM;
+check_hard_stop.py written and tested against synthetic build-log fixtures,
+and used to catch + fix a real self-contradiction in SCOPE.md's original
+hard-stop wording. The actual hard-stop call is still queued for Colab]`

@@ -72,13 +72,31 @@ concurrency rungs.
 
 ## The Day 21 engine hard stop
 
-If both TensorRT-LLM engines (A100 and L4) are not serving by end of the
-block's Day 4 (labelled "Day 21" in `M03-SERVING.md`'s programme-relative
-numbering), the TensorRT-LLM axis is dropped and the `M03-SERVING.md` §17
-contingency executes: report the A100 crossover if that engine landed, with
-the L4 build failure reported as a portability result in its own right, plus
-a vLLM-only L4 concurrency curve so the card axis still has data. Fixed
-today, before it is inconvenient.
+By end of the block's Day 4 (labelled "Day 21" in `M03-SERVING.md`'s
+programme-relative numbering), each card's TensorRT-LLM engine is either
+serving or it isn't, and the two outcomes are handled differently — this is
+fixed today, before it is inconvenient:
+
+- **Both serving.** Proceed with the full TensorRT-LLM axis on both cards.
+- **A100 serving, L4 not.** `M03-SERVING.md` §17's named fallback: report
+  the A100 crossover; report the L4 build failure with its exact error as a
+  **portability result**, not a gap; add a vLLM-only L4 concurrency curve so
+  the card axis still has data.
+- **L4 serving, A100 not.** Not a case §17 names directly (it assumes the
+  A100 build succeeds first, per the Day 20 → Day 21 ordering), but the same
+  logic applies symmetrically: report the L4 crossover, the A100 failure
+  with its exact error, and a vLLM-only A100 curve.
+- **Neither serving.** The TensorRT-LLM axis is dropped **entirely**, and
+  the Day 18 contingency executes instead (`M03-SERVING.md` §17,
+  "TensorRT-LLM will not install on the runtime"): the framework axis
+  becomes vLLM configuration knobs (KV-cache fraction, max-num-seqs,
+  chunked prefill on/off) — still a concurrency sweep, still two cards,
+  still a crossover question. This file gets rewritten then, not later.
+
+`scripts/check_hard_stop.py` reads the build log and applies exactly this
+rule mechanically, so the call made in the moment is "run the script and
+read its verdict," not a judgment call made under the pressure of a
+disconnected Colab session.
 
 ## What this is, and is not
 
