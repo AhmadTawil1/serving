@@ -104,9 +104,13 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    # Before launching, not after: a server already on this port would make
+    # every later health check meaningless (LOG.md Day 8).
+    serve_common.assert_port_free(_LABEL, args.port)
+
     proc = launch(args.card, args.precision, args.port, args.prefix_caching)
     try:
-        serve_common.wait_healthy(_LABEL, args.port)
+        serve_common.wait_healthy(_LABEL, args.port, proc=proc)
         serve_common.warmup(_LABEL, args.port)
         serve_common.sanity_check(_LABEL, args.port)
         print(f"[{_LABEL}] server is up -- Ctrl+C to stop")

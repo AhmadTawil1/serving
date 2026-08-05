@@ -15,6 +15,7 @@ that is really a harness artifact.
 from __future__ import annotations
 
 import json
+import subprocess  # noqa: F401  (type annotation on wait_healthy's `proc`)
 import sys
 import time
 
@@ -58,12 +59,67 @@ def require_gpu_host(label: str) -> None:
         )
 
 
+def assert_port_free(label: str, port: int, health_path: str = "/health") -> None:
+    """Refuse to launch if something is already serving on `port`.
+
+    Added 5 Aug 2026 after this exact situation produced a silently invalid
+    curve (LOG.md Day 8). Sequence: the caching-off L4 server was left running,
+    the caching-on server was launched onto the same port, vLLM died with
+    `OSError: [Errno 98] Address already in use` -- and `wait_healthy` then
+    polled port 8000, got a 200 from the **old** server, and reported
+    "healthy". The sweep ran happily against the previous configuration and
+    produced a file that was byte-for-byte a second measurement of the run it
+    was supposed to be compared against.
+
+    Nothing in the record would have revealed it: the config block is written
+    from the launcher's arguments, not from the server's, so the file claimed
+    prefix caching was on. It was caught only because the on/off ratio came out
+    at exactly 1.00x at all eight concurrency levels -- a number too clean to
+    be physical.
+
+    Same lesson as Measurement 01's corpus_sha false alarm: **a check must
+    interrogate the thing it claims to check.** A health probe that cannot tell
+    one server from another is not a health probe for the server you launched.
+    """
+    url = f"http://localhost:{port}{health_path}"
+    try:
+        alive = requests.get(url, timeout=3).status_code == 200
+    except requests.RequestException:
+        return  # nothing there: the normal case
+    if alive:
+        fail(
+            label,
+            f"something is already serving on port {port}. Launching now would "
+            f"fail with EADDRINUSE and every later health check would be "
+            f"answered by the OLD server -- producing a valid-looking sweep of "
+            f"the wrong configuration. Stop it first: pkill -f 'vllm serve'",
+        )
+
+
 def wait_healthy(
-    label: str, port: int, health_path: str = "/health", timeout_s: int = HEALTH_TIMEOUT_S
+    label: str,
+    port: int,
+    health_path: str = "/health",
+    timeout_s: int = HEALTH_TIMEOUT_S,
+    proc: "subprocess.Popen | None" = None,
 ) -> None:
+    """Poll until the server answers, or until the launched process dies.
+
+    `proc` is not optional in practice -- pass it. Without it this function
+    cannot distinguish "my server is still starting" from "my server is dead
+    and someone else is answering", which is precisely the failure described in
+    `assert_port_free`.
+    """
     url = f"http://localhost:{port}{health_path}"
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        if proc is not None and proc.poll() is not None:
+            fail(
+                label,
+                f"the launched server exited with code {proc.returncode} before "
+                f"becoming healthy. Any 200 on port {port} is coming from a "
+                f"different process -- check the log above for the real error",
+            )
         try:
             if requests.get(url, timeout=5).status_code == 200:
                 print(f"[{label}] healthy")
