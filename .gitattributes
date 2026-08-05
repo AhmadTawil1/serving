@@ -1,0 +1,12 @@
+# Provenance-critical files are hashed over their exact bytes
+# (`serving/prompts.py: prompts_sha()`), so a line-ending conversion silently
+# changes the hash without changing a character of content. A Windows editor
+# rewrote data/prompts.json to CRLF once, which would have shipped a prompt
+# file that did not correspond to the published records.
+#
+# Force LF for everything text, and treat the frozen data files as binary so
+# nothing is tempted to normalise them at all.
+* text=auto eol=lf
+data/prompts.json           -text
+data/mock_validity_gate.jsonl -text
+results/*.jsonl             -text

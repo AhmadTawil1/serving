@@ -3,7 +3,11 @@
 A controlled measurement of whether a vLLM tuning decision made on one GPU
 transfers to another, and whether the answer changes with load.
 
-**[Read the paper (PDF)](paper/main.pdf)** · 12 pages
+<p align="left">
+  <a href="paper/main.pdf">
+    <img src="https://img.shields.io/badge/Paper-PDF-red?style=for-the-badge&logo=adobeacrobatreader&logoColor=white" alt="Read the paper (PDF)">
+  </a>
+</p>
 
 ---
 

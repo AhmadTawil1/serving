@@ -27,6 +27,7 @@ the conclusion changes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 import sys
@@ -106,6 +107,38 @@ def check_integrity(data: dict[str, dict[int, list[dict]]]) -> list[str]:
             findings.append(f"**CONTROL BROKEN** prov.{field} differs across curves: {vals}")
         else:
             findings.append(f"[ok] prov.{field} identical across all curves: {ref['prov'][field][:12]}…")
+
+    # The prompt file on disk must still hash to what the records claim. This
+    # is not paranoia: a Windows editor once rewrote `data/prompts.json` from
+    # LF to CRLF line endings, changing 23 bytes and therefore the SHA1, without
+    # altering a single character of content. Nothing else in the pipeline would
+    # have noticed -- the records carry the OLD hash, the file carries the NEW
+    # one, and the repository would have shipped a prompt set that does not
+    # correspond to the published results.
+    #
+    # `prompts_sha()` hashes exact bytes by design (that is what makes it a
+    # provenance stamp rather than a content summary), so byte-level churn is
+    # exactly what it must catch. `.gitattributes` prevents the conversion;
+    # this asserts it stayed prevented.
+    prompts_file = ROOT / "data" / "prompts.json"
+    if prompts_file.exists():
+        on_disk = hashlib.sha1(prompts_file.read_bytes()).hexdigest()
+        stamped = {
+            r["prov"]["prompts_sha"]
+            for by_conc in data.values()
+            for recs in by_conc.values()
+            for r in recs
+        }
+        if len(stamped) == 1 and on_disk == next(iter(stamped)):
+            findings.append(f"[ok] data/prompts.json still hashes to the value stamped in every record: {on_disk[:12]}…")
+        else:
+            findings.append(
+                f"**PROVENANCE BROKEN** data/prompts.json hashes to {on_disk[:12]}… "
+                f"but the records were produced with {sorted(x[:12] for x in stamped)}. "
+                "The prompt file in this working tree is not the one that produced "
+                "these results. Check line endings first (git diff --stat will show "
+                "nothing if only bytes changed)."
+            )
 
     # git_sha is EXPECTED to differ -- code changed between sessions. Report the
     # values so the Method section can state which SHA produced which curve,
